@@ -181,6 +181,9 @@ class InboundMessage:
     media_refs: list[MediaRef] = field(default_factory=list)
     reply: dict[str, Any] | None = None
     timestamp: int = 0
+    # 企业微信消息 ID / 序号：语音转文字接口要求 msgServerId（不是事件游标 id）。
+    msg_server_id: int = 0
+    seq: int = 0
     raw: dict[str, Any] = field(default_factory=dict)
 
     @property
@@ -715,6 +718,8 @@ def parse_event(
         media_refs=media_refs,
         reply=reply,
         timestamp=_int(structured.get("timestamp")),
+        msg_server_id=_int(structured.get("msgServerId")),
+        seq=_int(structured.get("seq")),
         raw=item,
     )
     if inbox.media and not inbox.text:

@@ -96,6 +96,11 @@ def test_reply_anchor_and_event():
 class FakeClient:
     def __init__(self):
         self.texts = []
+        self.voice_calls = []
+
+    async def voice_to_text(self, msg_server_id, *, seq=0):
+        self.voice_calls.append((msg_server_id, seq))
+        return "明天天气怎么样"
 
     async def get_room_detail(self, room_id):
         return {"roomName": "测试群"}
@@ -164,6 +169,38 @@ def _dm_item_for(user_id, text):
     item["message"]["structured"]["senderId"] = user_id
     item["message"]["structured"]["msgData"] = {"content": text}
     return item
+
+
+def test_voice_message_uses_qwpad_transcript():
+    from qwpad_plugin.qwpad_client import MSG_VOICE_CDN
+
+    adapter = _adapter()
+    client = FakeClient()
+    adapter._client = client
+    item = _group_item()
+    item["message"]["msgType"] = MSG_VOICE_CDN
+    item["message"]["structured"]["msgType"] = MSG_VOICE_CDN
+    item["message"]["structured"]["msgServerId"] = 987654321
+    item["message"]["structured"]["seq"] = 5
+    item["message"]["structured"]["msgData"] = {
+        "voiceTime": 3,
+        "atList": [{"userId": "999"}],
+    }
+    item["display"]["messageType"] = {"nativeName": "kVoiceCDN"}
+    item["display"]["parseStatus"] = "parsed_media"
+
+    inbox = parse_event(item, self_id="999", self_nick="小助理")
+    assert inbox is not None and inbox.media is not None
+    assert inbox.media.kind == "voice"
+    asyncio.run(adapter._handle_event_item(item))
+
+    event = adapter._event_queue.get_nowait()
+    assert client.voice_calls == [(987654321, 5)]
+    assert event.message_obj.message_str == "明天天气怎么样"
+    assert any(
+        isinstance(c, Plain) and c.text == "明天天气怎么样"
+        for c in event.message_obj.message
+    )
 
 
 def test_dispatch_failure_does_not_lose_message(monkeypatch):

@@ -615,6 +615,43 @@ class QWPadClient:
             data["fileMd5"] = _md5_file(path)
         return data
 
+    async def voice_to_text(
+        self,
+        msg_server_id: int,
+        *,
+        seq: int = 0,
+        timeout: float = 15.0,
+        interval: float = 0.8,
+    ) -> str:
+        """``/msg/voiceToTextApply`` + ``/msg/voiceToTextQuery``：语音转文字。
+
+        ``msg_server_id`` 必须是企业微信消息 ID（``structured.msgServerId``），
+        不是本地事件游标 id。任务未完成时按 ``interval`` 轮询，超时抛错。
+        """
+        msg_id = int(msg_server_id or 0)
+        if msg_id <= 0:
+            raise QWPadApiError("语音转文字缺少 msgServerId", retryable=False)
+        applied = await self.post("/msg/voiceToTextApply", {"msgServerId": msg_id})
+        voice_id = str((applied or {}).get("voiceId") or "").strip()
+        if not voice_id:
+            raise QWPadApiError(
+                "语音转文字申请未返回 voiceId", retryable=False
+            )
+        payload: dict[str, Any] = {"msgServerId": msg_id, "voiceId": voice_id}
+        if seq:
+            payload["seq"] = int(seq)
+        deadline = asyncio.get_running_loop().time() + max(1.0, timeout)
+        while True:
+            data = await self.post("/msg/voiceToTextQuery", payload) or {}
+            text = str(data.get("text") or "").strip()
+            if data.get("isEnd"):
+                return text
+            if asyncio.get_running_loop().time() >= deadline:
+                raise QWPadApiError(
+                    "语音转文字超时（任务未完成）", retryable=True
+                )
+            await asyncio.sleep(max(0.2, interval))
+
     async def upload_file(
         self, path: str, file_type: int = FILE_TYPE_FILE
     ) -> dict[str, Any]:

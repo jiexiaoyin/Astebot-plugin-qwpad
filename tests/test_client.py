@@ -58,6 +58,47 @@ def test_download_url_rejects_fs_scheme():
         _run(run())
 
 
+def test_voice_to_text_applies_then_polls():
+    seen = []
+    queries = []
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        body = json.loads(request.content)
+        seen.append((request.url.path, body))
+        if request.url.path == "/msg/voiceToTextApply":
+            return httpx.Response(
+                200, json={"code": 0, "msg": "ok", "data": {"voiceId": "VID-1"}}
+            )
+        queries.append(body)
+        if len(queries) == 1:
+            return httpx.Response(
+                200,
+                json={"code": 0, "msg": "ok", "data": {"isEnd": False, "text": ""}},
+            )
+        return httpx.Response(
+            200,
+            json={"code": 0, "msg": "ok", "data": {"isEnd": True, "text": "你好呀"}},
+        )
+
+    async def run():
+        client = QWPadClient("wxa_test", transport=httpx.MockTransport(handler))
+        try:
+            return await client.voice_to_text(
+                123456789, seq=7, timeout=2, interval=0.01
+            )
+        finally:
+            await client.close()
+
+    assert _run(run()) == "你好呀"
+    assert seen[0] == ("/msg/voiceToTextApply", {"msgServerId": 123456789})
+    assert queries[0] == {
+        "msgServerId": 123456789,
+        "voiceId": "VID-1",
+        "seq": 7,
+    }
+    assert len(queries) == 2
+
+
 def test_send_video_prefers_upload_duration_and_thumb():
     seen = {}
 

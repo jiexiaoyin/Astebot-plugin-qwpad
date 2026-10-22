@@ -239,8 +239,10 @@ curl -s -X POST http://127.0.0.1:6185/api/plug/astrbot-plugin-qwpad/status \
 ### 5.4 媒体验证（可选）
 
 - 私聊发图片/文件/语音，确认日志 `media=1` 且模型能收到；
+- 发一条语音，确认日志出现 `语音转文字成功 msgServerId=... len=...`，且机器人
+  回复内容与语音相符；转写失败会记 `语音转文字失败，保留语音附件`（不影响消息）；
 - 让机器人回复语音，确认收到语音气泡而不是文件；
-- 语音失败时检查 `ffmpeg`/`pilk`；
+- 出站语音失败时检查 `ffmpeg`/`pilk`；入站转写失败检查 QWPad 服务与网络；
 - 出站普通 CDN 上传必须 **小于 20MiB**：小于该值的视频/文件走
   `cdnBigUpload`，达到 20MiB 自动走 BigCDN（`cdnBigFileUpload`），可分别用
   小文件和大文件各测一次；图片超过 20MiB 会被明确拒绝，需先压缩。

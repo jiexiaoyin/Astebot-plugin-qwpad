@@ -55,6 +55,8 @@ NAME_CACHE_TTL_S = 900.0
 # 自动引用窗口：入站消息后这么久内的首条发送引用它；超时视为普通通知，不引用。
 QUOTE_WINDOW_S = 600.0
 MAX_FORWARD_REFS = 10
+# 语音转文字最多等这么久；超时保留语音附件，不阻塞消息。
+VOICE_ASR_TIMEOUT_S = 20.0
 # openapi：/user/getLoginStatus 的 userOnlineStatus=2 才表示当前 PAD 会话在线；
 # errorCode=0 只代表“查询成功”，账号掉线时也可能返回 0。
 ONLINE_STATUS_VALUE = 2
@@ -114,6 +116,11 @@ QWPad_CONFIG_METADATA: dict[str, dict[str, Any]] = {
         "type": "bool",
         "hint": "默认 true。只在原消息是文本/富文本时引用；引用发送失败会自动退化为普通文本。",
     },
+    "voice_to_text": {
+        "description": "入站语音自动转文字",
+        "type": "bool",
+        "hint": "默认 true。调用 QWPad /msg/voiceToTextApply|Query，成功后把识别文本交给模型；失败时保留语音附件，不影响消息处理。",
+    },
     "strip_markdown": {
         "description": "发送前清洗 Markdown",
         "type": "bool",
@@ -157,6 +164,7 @@ QWPad_CONFIG_METADATA: dict[str, dict[str, Any]] = {
         "allow_all_users": False,
         "group_reply": "atbot",
         "quote_replies": True,
+        "voice_to_text": True,
         "strip_markdown": True,
         "poll_wait_seconds": 25,
         "poll_limit": 50,
@@ -191,6 +199,7 @@ class QWPadAdapter(Platform):
         ).strip().rstrip("/")
         self.policy = PolicySnapshot.from_config(platform_config)
         self.quote_replies = as_bool(platform_config.get("quote_replies"), True)
+        self.voice_to_text = as_bool(platform_config.get("voice_to_text"), True)
         self.strip_markdown = as_bool(platform_config.get("strip_markdown"), True)
         self.poll_wait_seconds = max(
             1, min(as_int(platform_config.get("poll_wait_seconds"), 25), 30)
@@ -542,6 +551,16 @@ class QWPadAdapter(Platform):
                     path, kind = result
                     downloaded.append((ref, path, kind))
 
+        if self.voice_to_text and inbox.media and inbox.media.kind == "voice":
+            transcript = await self._transcribe_voice(inbox)
+            if transcript:
+                base = (inbox.text or "").strip()
+                inbox.text = (
+                    transcript
+                    if not base or base == inbox.placeholder
+                    else f"{base}\n{transcript}"
+                )
+
         chat_name = await self._chat_name(inbox)
         message = self._build_message(inbox, chat_name, downloaded)
         if self.quote_replies:
@@ -563,6 +582,34 @@ class QWPadAdapter(Platform):
             len(downloaded),
         )
         self.commit_event(event)
+
+    async def _transcribe_voice(self, inbox: InboundMessage) -> str:
+        """调用 QWPad 语音转文字；失败只记日志，保留语音附件。"""
+        client = self._client
+        if client is None or not inbox.msg_server_id:
+            return ""
+        try:
+            text = await asyncio.wait_for(
+                client.voice_to_text(inbox.msg_server_id, seq=inbox.seq),
+                timeout=VOICE_ASR_TIMEOUT_S,
+            )
+        except Exception as exc:  # noqa: BLE001 - 转写失败不影响消息
+            logger.warning(
+                "[QWPad:%s] 语音转文字失败，保留语音附件 msgServerId=%s: %s",
+                self.instance_id,
+                inbox.msg_server_id,
+                exc,
+            )
+            return ""
+        text = (text or "").strip()
+        if text:
+            logger.info(
+                "[QWPad:%s] 语音转文字成功 msgServerId=%s len=%s",
+                self.instance_id,
+                inbox.msg_server_id,
+                len(text),
+            )
+        return text
 
     def _build_message(
         self,
