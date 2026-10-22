@@ -131,7 +131,7 @@ def _dm_item():
     return item
 
 
-def test_event_send_records_outbound_count():
+def test_event_send_records_outbound_count(caplog):
     adapter = _adapter()
     client = FakeClient()
     adapter._client = client
@@ -142,6 +142,9 @@ def test_event_send_records_outbound_count():
 
     assert client.texts[0]["content"] == "收到"
     assert adapter.get_stats()["messages_out"] == 1
+    # 发送成功路径不能触发被吞掉的异常日志（曾因局部 import logger 触发
+    # UnboundLocalError，测试仍绿但线上每次发送都报错）。
+    assert "发送消息异常" not in caplog.text
 
 
 def test_get_stats_follows_base_contract():

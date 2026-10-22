@@ -64,8 +64,6 @@ class QWPadMessageEvent(AstrMessageEvent):
                 if stats.get("failed"):
                     self.set_extra("_qwpad_last_send_errors", stats.get("errors"))
         except Exception:  # noqa: BLE001 - 发送失败不能吞掉事件流程，但要留痕
-            from astrbot import logger
-
             logger.exception("[QWPad] 发送消息异常")
         finally:
             await super().send(message)
