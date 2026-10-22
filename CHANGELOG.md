@@ -19,3 +19,4 @@
 
 - 不再覆盖父类 `Platform._started_at`（其类型为 `datetime | None`），
   修复状态接口因 `float.isoformat()` 报 500 的问题；补充回归测试。
+- `event.send` 直发路径未计入 `messages_out`；现在按实际发送条数上报并记录发送日志。

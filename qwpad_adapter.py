@@ -247,6 +247,10 @@ class QWPadAdapter(Platform):
     def get_client(self) -> QWPadClient | None:
         return self._client
 
+    def record_outbound(self, count: int) -> None:
+        """由事件层上报实际发出的消息条数（event.send 不经过 send_by_session）。"""
+        self._messages_out += max(0, int(count))
+
     def get_stats(self) -> dict:
         stats = super().get_stats()
         stats.update(

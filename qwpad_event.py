@@ -13,6 +13,7 @@ from __future__ import annotations
 from collections.abc import AsyncGenerator
 from typing import TYPE_CHECKING, Any
 
+from astrbot import logger
 from astrbot.api.event import AstrMessageEvent, MessageChain
 
 from .qwpad_send import send_chain
@@ -52,6 +53,14 @@ class QWPadMessageEvent(AstrMessageEvent):
                 )
                 # 引用只用于本次回复的第一条出站消息。
                 self._reply_anchor = None
+                if adapter is not None and stats.get("sent"):
+                    adapter.record_outbound(stats["sent"])
+                    logger.info(
+                        "[QWPad:%s] 已发送 %s 条 -> %s",
+                        adapter.instance_id,
+                        stats["sent"],
+                        self.chat_id,
+                    )
                 if stats.get("failed"):
                     self.set_extra("_qwpad_last_send_errors", stats.get("errors"))
         except Exception:  # noqa: BLE001 - 发送失败不能吞掉事件流程，但要留痕

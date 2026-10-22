@@ -1,6 +1,7 @@
 import asyncio
 
-from astrbot.api.message_components import At, Reply
+from astrbot.api.event import MessageChain
+from astrbot.api.message_components import At, Plain, Reply
 
 from qwpad_plugin.qwpad_adapter import QWPadAdapter
 from qwpad_plugin.qwpad_messages import parse_event
@@ -88,11 +89,22 @@ def test_reply_anchor_and_event():
 
 
 class FakeClient:
+    def __init__(self):
+        self.texts = []
+
     async def get_room_detail(self, room_id):
         return {"roomName": "测试群"}
 
     async def batch_get_userinfo(self, user_ids):
         return {"contactList": []}
+
+    async def send_text(self, to_id, content, reply=None):
+        self.texts.append({"to": to_id, "content": content, "reply": reply})
+        return {"msgUniqueIdentifier": "sent-1"}
+
+    async def send_hyper_text(self, to_id, content, reply=None):
+        self.texts.append({"to": to_id, "content": content, "reply": reply})
+        return {"msgUniqueIdentifier": "sent-2"}
 
 
 def test_handle_event_item_commits_to_event_queue():
@@ -108,6 +120,28 @@ def test_handle_event_item_commits_to_event_queue():
     # 同一条消息再次进入会被去重
     asyncio.run(adapter._handle_event_item(_group_item()))
     assert adapter._event_queue.qsize() == 0
+
+
+def _dm_item():
+    item = _group_item()
+    item["display"]["roomId"] = "0"
+    item["display"]["senderName"] = "张三"
+    item["message"]["structured"]["fromRoomId"] = "0"
+    item["message"]["structured"]["msgData"] = {"content": "你好"}
+    return item
+
+
+def test_event_send_records_outbound_count():
+    adapter = _adapter()
+    client = FakeClient()
+    adapter._client = client
+    inbox = parse_event(_dm_item(), self_id="999", self_nick="小助理")
+    event = adapter.create_event(adapter._build_message(inbox, "张三", []))
+
+    asyncio.run(event.send(MessageChain([Plain("收到")])))
+
+    assert client.texts[0]["content"] == "收到"
+    assert adapter.get_stats()["messages_out"] == 1
 
 
 def test_get_stats_follows_base_contract():
