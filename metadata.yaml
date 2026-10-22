@@ -3,5 +3,5 @@ desc: QWPad 企业微信 pad 协议平台适配器 for AstrBot（一个 TOKEN �
 version: 0.2.0
 author: knowhub-ops
 astrbot_version: ">=4.16.0,<5"
-repo: https://github.com/jiexiaoyin/Astebot-plugins-qwpad
+repo: https://github.com/jiexiaoyin/Astebot-plugin-qwpad
 entry: main
