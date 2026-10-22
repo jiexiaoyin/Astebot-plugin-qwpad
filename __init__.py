@@ -1,0 +1,1 @@
+"""astrbot-plugin-qwpad package."""
