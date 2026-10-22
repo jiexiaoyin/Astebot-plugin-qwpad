@@ -4,7 +4,7 @@
 它通过 [QWPad](https://api.qwpad.com) 的 OpenAPI 长轮询收发消息，让 AstrBot 直接以
 企业微信账号身份与同事、客户对话，**不需要公网 IP、不需要配置回调地址**。
 
-当前版本：`0.2.0` · 适用 AstrBot `>= 4.16.0, < 5`（已在 4.29.0 验证）
+当前版本：`0.2.1` · 适用 AstrBot `>= 4.16.0, < 5`（已在 4.29.0 验证）
 
 - 仓库：<https://github.com/jiexiaoyin/Astebot-plugin-qwpad>
 - 许可证：MIT
@@ -121,6 +121,7 @@ QWPad 的 `wxa_` TOKEN 与企业微信账号一一对应。插件按平台实例
 - 发送前清洗 Markdown（企业微信不渲染 Markdown）；
 - @ 成员 / @所有人、引用回复；
 - 图片、语音（任意音频 → SILK）、视频、文件上传后发送；
+- 视频/文件 ≥20MiB 自动改走 BigCDN（`cdnBigFileUpload` → `sendBigFile/sendBigVideo`）；
 - 同一会话的发送串行化，避免多条回复的分片互相穿插；
 - 流式输出自动聚合为一条消息（企业微信不支持消息编辑）。
 
@@ -170,7 +171,7 @@ AstrBot Dashboard → 插件管理 → 安装插件 → 填入仓库地址：
 https://github.com/jiexiaoyin/Astebot-plugin-qwpad
 ```
 
-安装后在插件列表确认版本为 `0.2.0`，并重启 AstrBot 或重载插件。
+安装后在插件列表确认版本为 `0.2.1`，并重启 AstrBot 或重载插件。
 
 ### 5.2 手动部署
 
@@ -193,7 +194,7 @@ docker restart astrbot   # 或重启你的 AstrBot 进程
 
 ```text
 Loading plugin astrbot-plugin-qwpad ...
-Plugin astrbot-plugin-qwpad (0.2.0) ...
+Plugin astrbot-plugin-qwpad (0.2.1) ...
 Loading IM platform adapter wecom(Pad)(wecom(Pad)) ...
 ```
 
@@ -368,11 +369,14 @@ AstrBot Dashboard → 平台配置 → `wecom(Pad)` 实例。
 | --- | --- | --- |
 | 图片 | 下载后以 `Image` 交给模型 | 上传 → `sendImage` |
 | 语音 | SILK → WAV（`pilk`）；失败按文件 | `ffmpeg` → 24kHz PCM → SILK，≤60KB；超限自动降码率 |
-| 视频 | 下载后以 `Video` 交给模型 | 上传 → 探测时长 → `sendVideo` |
-| 文件 | 下载后以 `File` 交给模型 | 上传 → `sendFile` |
+| 视频 | 下载后以 `Video` 交给模型 | `<20MiB`：上传 → `sendVideo`；`≥20MiB`：BigCDN → `sendBigVideo` |
+| 文件 | 下载后以 `File` 交给模型 | `<20MiB`：上传 → `sendFile`；`≥20MiB`：BigCDN → `sendBigFile` |
 | 位置/链接/卡片 | 转成可读文本 | 不支持结构化发送，退化为文本 |
 
 - 单个入站媒体上限 50MB；
+- 普通 CDN 上传要求文件非空且 **小于 20MiB**；达到 20MiB 的视频/文件自动走
+  BigCDN（`fileType` 22/35），图片没有大文件接口，超过上限会明确报错并提示压缩；
+- 上传以文件句柄流式提交，不会把整个大文件读入内存；
 - 语音编码需要 `ffmpeg` + `pilk`，任一缺失时出站语音降级为文件；
 - 入站媒体下载到临时目录，事件处理结束后由 AstrBot 清理。
 
@@ -451,7 +455,8 @@ curl -s -X POST http://127.0.0.1:6185/api/plug/astrbot-plugin-qwpad/status \
       "account": {
         "user_id": "zhangsan",
         "nickname": "张三",
-        "corp_name": "示例企业"
+        "corp_name": "示例企业",
+        "online": true
       },
       "cursor": 12345,
       "dedupe_size": 42,
@@ -480,7 +485,7 @@ curl -s -X POST http://127.0.0.1:6185/api/plug/astrbot-plugin-qwpad/status \
 | --- | --- |
 | `connected` | 适配器是否处于运行状态 |
 | `status` | AstrBot 平台状态（如 `running`） |
-| `account` | 当前登录的企业微信账号信息 |
+| `account` | 当前登录的企业微信账号信息；`online` 来自 `userOnlineStatus=2`，查询失败/缺字段时为 `null` |
 | `cursor` | 已处理到的服务端事件 id |
 | `dedupe_size` | 当前进程内去重集合大小（上限 2000） |
 | `messages_in/out` | 本次运行累计收发条数 |
@@ -545,7 +550,7 @@ Loading plugin astrbot-plugin-qwpad ...
 | 启动报 `TOKEN 未配置` | `token` 为空 | 在平台配置填入 `wxa_...` |
 | 启动报 `同一 TOKEN 已被平台实例 ... 使用` | 同一 AstrBot 内重复实例，或 Hermes 等外部程序在轮询 | 只保留一个消费者；删除/停用重复实例 |
 | 启动报 `TOKEN 无效或已失效` | TOKEN 错误、被重置、`api_base` 不对 | 在 QWPad 控制台重新复制 TOKEN，检查 `api_base` |
-| 报账号不在线（`errorCode != 0`） | 企业微信账号掉线 | 在 QWPad 控制台重新扫码登录，保持 pad 在线 |
+| 启动报 `账号未在线（userOnlineStatus=...）` | `errorCode=0` 只表示查询成功，`userOnlineStatus` 不是 2 就表示账号未在线 | 在 QWPad 控制台重新扫码登录，保持 pad 在线 |
 | `connected=true` 但私聊不回复 | 白名单为空或发送者不在 `allow_users` | 看启动 WARN；把对方 userId 加入白名单，或临时 `allow_all_users=true` |
 | 群里 @ 了也不回复 | 群不在 `allow_groups`、`group_reply=none`、没有真正 @、AstrBot 唤醒/LLM 配置问题 | 查日志「策略拒绝」原因；确认 mention；检查 AstrBot 的唤醒与模型配置 |
 | 群里未 @ 不回复 | 默认 `atbot` 只放行 @ 消息 | 需要观察用 `all`；需要主动回复请配合主动回复插件 |
@@ -608,7 +613,7 @@ qwpad_client ──► qwpad_messages（解析/过滤）
 
 运行细节：
 
-- 每 300 秒检查一次账号在线状态，掉线只记录警告，不停止轮询；
+- 每 300 秒检查一次账号在线状态（只认 `userOnlineStatus=2`），掉线只记录警告，不停止轮询；
 - 轮询异常按 1s→60s 退避；TOKEN 失效会停止该实例；
 - 去重集合为进程内 LRU，容量 2000；
 - 群名/联系人昵称缓存 15 分钟；
@@ -654,6 +659,8 @@ qwpad_client ──► qwpad_messages（解析/过滤）
 
 - `token` 是账号凭据：只保存在 AstrBot 配置中，不要提交到 Git、不要发群、不要截图；
 - 本插件不会通过状态接口返回 TOKEN，日志只使用 TOKEN 指纹；
+- 下载 `cloudUrl` 使用独立的无鉴权 HTTP 客户端，不会把 TOKEN 发给对象存储；`fs://`
+  地址说明存储未开启 HTTP 出口，插件会明确报错而不是拼接凭据；
 - 默认拒绝所有消息，先配置白名单再放开；
 - 生产环境使用 HTTPS 的 `api_base`；
 - 一个 TOKEN 只允许一个消费者，避免 Hermes/AstrBot 同时轮询；
@@ -666,7 +673,8 @@ qwpad_client ──► qwpad_messages（解析/过滤）
 - **无消息编辑能力**：流式输出只能聚合后一次性发送；
 - **引用有类型限制**：仅文本/富文本原消息可引用；失败自动退化为普通文本；
 - **语音限制**：出站 SILK 目标 ≤60KB，超限降码率；`ffmpeg`/`pilk` 缺失时降级为文件；
-- **媒体大小**：入站单文件上限 50MB；
+- **媒体大小**：入站单文件上限 50MB；出站普通 CDN 上传必须小于 20MiB，
+  达到 20MiB 的视频/文件自动改走 BigCDN，图片没有大文件接口只能压缩后再发；
 - **@ 必须是真实 mention**：纯文本里的 `@名字` 不算；
 - **群成员白名单是「或」关系**：`allow_users` 中的成员可在任意群通过准入（`atbot` 仍需 @）；
 - **同一 TOKEN 不支持多实例**：没有负载均衡/主备；

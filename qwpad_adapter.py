@@ -55,6 +55,16 @@ NAME_CACHE_TTL_S = 900.0
 # 自动引用窗口：入站消息后这么久内的首条发送引用它；超时视为普通通知，不引用。
 QUOTE_WINDOW_S = 600.0
 MAX_FORWARD_REFS = 10
+# openapi：/user/getLoginStatus 的 userOnlineStatus=2 才表示当前 PAD 会话在线；
+# errorCode=0 只代表“查询成功”，账号掉线时也可能返回 0。
+ONLINE_STATUS_VALUE = 2
+
+
+def account_online_state(status: dict[str, Any] | None) -> bool | None:
+    """True=在线，False=不在线，None=响应没带该字段（无法判断）。"""
+    if not isinstance(status, dict) or "userOnlineStatus" not in status:
+        return None
+    return as_int(status.get("userOnlineStatus"), -1) == ONLINE_STATUS_VALUE
 
 
 QWPad_CONFIG_METADATA: dict[str, dict[str, Any]] = {
@@ -214,6 +224,7 @@ class QWPadAdapter(Platform):
         self._self_id = ""
         self._self_nick = ""
         self._corp_name = ""
+        self._account_online: bool | None = None
         self._last_status_check = 0.0
         self._skip_before = 0.0
         self._room_cache: dict[str, tuple[str, float]] = {}
@@ -234,8 +245,11 @@ class QWPadAdapter(Platform):
         session_id = str(getattr(message, "session_id", "") or "")
         anchor = self._pending_reply.pop(session_id, None)
         reply_anchor = None
-        if anchor and self._anchor_is_quotable(anchor[1]):
-            reply_anchor = anchor[1]
+        if anchor:
+            remembered_at, data = anchor
+            fresh = time.monotonic() - remembered_at <= QUOTE_WINDOW_S
+            if fresh and self._anchor_is_quotable(data):
+                reply_anchor = data
         return QWPadMessageEvent(
             message_str=message.message_str,
             message_obj=message,
@@ -263,6 +277,7 @@ class QWPadAdapter(Platform):
                     "user_id": self._self_id,
                     "nickname": self._self_nick,
                     "corp_name": self._corp_name,
+                    "online": self._account_online,
                 },
                 "cursor": self._cursor,
                 "dedupe_size": len(self._dedupe),
@@ -306,8 +321,21 @@ class QWPadAdapter(Platform):
             error_code = as_int(status.get("errorCode"), 0)
             if error_code != 0:
                 raise RuntimeError(
-                    "QWPad 账号不在线（errorCode=%s %s），请先在 QWPad 控制台完成扫码登录"
+                    "QWPad 登录状态查询失败（errorCode=%s %s），"
+                    "请先在 QWPad 控制台检查账号与 TOKEN"
                     % (error_code, status.get("errorMsg") or "")
+                )
+            self._account_online = account_online_state(status)
+            if self._account_online is False:
+                raise RuntimeError(
+                    "QWPad 账号未在线（userOnlineStatus=%s，errorCode=0 仅表示查询成功），"
+                    "请先在 QWPad 控制台完成扫码登录"
+                    % status.get("userOnlineStatus")
+                )
+            if self._account_online is None:
+                logger.warning(
+                    "[QWPad:%s] /user/getLoginStatus 未返回 userOnlineStatus，无法确认账号是否在线",
+                    self.instance_id,
                 )
 
             self._cursor_store = CursorStore(instance_dir(self.instance_id))
@@ -439,11 +467,18 @@ class QWPadAdapter(Platform):
             return
         with contextlib.suppress(QWPadError):
             status = await client.get_login_status()
+            self._account_online = account_online_state(status)
             if as_int(status.get("errorCode"), 0) != 0:
                 logger.warning(
-                    "[QWPad:%s] 账号掉线: %s",
+                    "[QWPad:%s] 账号状态查询失败: %s",
                     self.instance_id,
                     status.get("errorMsg") or status.get("errorCode"),
+                )
+            elif self._account_online is False:
+                logger.warning(
+                    "[QWPad:%s] 账号掉线（userOnlineStatus=%s），请重新扫码登录",
+                    self.instance_id,
+                    status.get("userOnlineStatus"),
                 )
 
     async def _handle_event_item(self, item: dict[str, Any]) -> None:

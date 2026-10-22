@@ -4,7 +4,11 @@ import pytest
 from astrbot.api.event import MessageChain
 from astrbot.api.message_components import At, Plain, Reply
 
-from qwpad_plugin.qwpad_adapter import QWPadAdapter
+from qwpad_plugin.qwpad_adapter import (
+    QUOTE_WINDOW_S,
+    QWPadAdapter,
+    account_online_state,
+)
 from qwpad_plugin.qwpad_messages import parse_event
 from qwpad_plugin.qwpad_policy import PolicySnapshot
 
@@ -256,6 +260,70 @@ def test_get_stats_follows_base_contract():
     assert stats["started_at"] is None
     assert stats["connected"] is False
     assert stats["policy"]["allow_all_users"] is True
+
+
+def test_account_online_state_uses_user_online_status():
+    # openapi：errorCode=0 只表示查询成功；userOnlineStatus=2 才是在线。
+    assert account_online_state({"errorCode": 0, "userOnlineStatus": 2}) is True
+    assert account_online_state({"errorCode": 0, "userOnlineStatus": 0}) is False
+    assert account_online_state({"errorCode": 0, "userOnlineStatus": 1}) is False
+    assert account_online_state({"errorCode": 0}) is None
+    assert account_online_state(None) is None
+
+
+def test_run_rejects_offline_account(monkeypatch):
+    from qwpad_plugin import qwpad_adapter
+
+    class OfflineClient:
+        async def get_login_status(self):
+            return {
+                "errorCode": 0,
+                "errorMsg": "",
+                "userId": "1001",
+                "userOnlineStatus": 0,
+            }
+
+        async def close(self):
+            return None
+
+    monkeypatch.setattr(
+        qwpad_adapter, "QWPadClient", lambda *args, **kwargs: OfflineClient()
+    )
+    adapter = QWPadAdapter(
+        {"id": "qwpad-offline", "token": "wxa_offline"}, {}, asyncio.Queue()
+    )
+    async def run():
+        with pytest.raises(RuntimeError, match="userOnlineStatus=0"):
+            await adapter.run()
+
+    asyncio.run(run())
+
+
+def test_check_account_status_warns_when_offline(caplog):
+    class StatusClient:
+        async def get_login_status(self):
+            return {"errorCode": 0, "userOnlineStatus": 0, "errorMsg": ""}
+
+    adapter = _adapter()
+    adapter._client = StatusClient()
+    asyncio.run(adapter._check_account_status())
+    assert "账号掉线" in caplog.text
+    assert adapter.get_stats()["account"]["online"] is False
+
+
+def test_quote_anchor_expires_after_window():
+    adapter = _adapter()
+    inbox = parse_event(_dm_item(), self_id="999", self_nick="小助理")
+    message = adapter._build_message(inbox, "张三", [])
+    adapter._remember_reply_anchor(inbox)
+
+    old_ts, data = adapter._pending_reply["1001"]
+    adapter._pending_reply["1001"] = (old_ts - QUOTE_WINDOW_S - 1, data)
+    assert adapter.create_event(message)._reply_anchor is None
+
+    adapter._remember_reply_anchor(inbox)
+    anchor = adapter.create_event(message)._reply_anchor
+    assert anchor is not None
 
 
 def test_non_text_anchor_not_quoted():

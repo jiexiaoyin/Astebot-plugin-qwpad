@@ -3,7 +3,7 @@
 本文面向运维/部署人员，说明如何把 `astrbot-plugin-qwpad` 装进 AstrBot、配置平台
 实例、验证收发，以及从 0.1.x 迁移到 0.2.x。
 
-- 插件版本：`0.2.0`
+- 插件版本：`0.2.1`
 - 验证环境：AstrBot `4.29.0`（Docker，`soulter/astrbot:v4.29.0`）
 - 仓库：<https://github.com/jiexiaoyin/Astebot-plugin-qwpad>
 
@@ -30,10 +30,11 @@ docker ps --filter name=astrbot --format '{{.Names}} {{.Status}}'
 
 ### 0.2 确认账号在线
 
-在 QWPad 控制台确认目标企业微信账号已扫码登录且在线。账号掉线时插件会报：
+在 QWPad 控制台确认目标企业微信账号已扫码登录且在线。注意 `errorCode=0`
+只表示状态查询成功，**`userOnlineStatus=2` 才是在线**。账号未在线时插件会报：
 
 ```text
-QWPad 账号不在线（errorCode=...），请先在 QWPad 控制台完成扫码登录
+QWPad 账号未在线（userOnlineStatus=...，errorCode=0 仅表示查询成功），请先在 QWPad 控制台完成扫码登录
 ```
 
 ### 0.3 确认网络
@@ -60,7 +61,7 @@ AstrBot Dashboard → 插件管理 → 安装插件 → 填入仓库地址：
 https://github.com/jiexiaoyin/Astebot-plugin-qwpad
 ```
 
-安装后确认插件版本为 `0.2.0`。
+安装后确认插件版本为 `0.2.1`。
 
 ### 方式 B：手动部署
 
@@ -180,7 +181,7 @@ docker logs --since 3m astrbot 2>&1 | grep -iE 'qwpad|wecom\(Pad\)|platform'
 
 ```text
 Loading plugin astrbot-plugin-qwpad ...
-Plugin astrbot-plugin-qwpad (0.2.0) ...
+Plugin astrbot-plugin-qwpad (0.2.1) ...
 Loading IM platform adapter wecom(Pad)(wecom(Pad)) ...
 [QWPad:wecom(Pad)] 已连接 <昵称>（<企业> / <userId>），游标 <n>，策略 ...
 ```
@@ -211,6 +212,7 @@ curl -s -X POST http://127.0.0.1:6185/api/plug/astrbot-plugin-qwpad/status \
 - `connected=true`
 - `status="running"`
 - `account.user_id` 正确
+- `account.online=true`（来自 `userOnlineStatus=2`）
 - `last_error=null`
 
 字段详情见 [README 状态接口](README.md#11-状态接口)。
@@ -238,7 +240,10 @@ curl -s -X POST http://127.0.0.1:6185/api/plug/astrbot-plugin-qwpad/status \
 
 - 私聊发图片/文件/语音，确认日志 `media=1` 且模型能收到；
 - 让机器人回复语音，确认收到语音气泡而不是文件；
-- 语音失败时检查 `ffmpeg`/`pilk`。
+- 语音失败时检查 `ffmpeg`/`pilk`；
+- 出站普通 CDN 上传必须 **小于 20MiB**：小于该值的视频/文件走
+  `cdnBigUpload`，达到 20MiB 自动走 BigCDN（`cdnBigFileUpload`），可分别用
+  小文件和大文件各测一次；图片超过 20MiB 会被明确拒绝，需先压缩。
 
 ### 5.5 重启不重放
 
@@ -365,7 +370,7 @@ docker logs --since 3m astrbot 2>&1 | grep -iE 'qwpad|wecom\(Pad\)'
 确认：
 
 ```text
-Plugin astrbot-plugin-qwpad (0.2.0) ...
+Plugin astrbot-plugin-qwpad (0.2.1) ...
 Loading IM platform adapter wecom(Pad)(wecom(Pad)) ...
 [QWPad:wecom(Pad)] 已连接 ...
 ```
@@ -405,7 +410,7 @@ docker start astrbot
 
 | 现象 | 检查 |
 | --- | --- |
-| 新增下拉没有 `wecom(Pad)` | 插件是否加载、版本是否 0.2.0、是否重启 |
+| 新增下拉没有 `wecom(Pad)` | 插件是否加载、版本是否 ≥0.2.0、是否重启 |
 | `TOKEN 未配置` | 平台配置 `token` 是否为空 |
 | `同一 TOKEN 已被平台实例 ... 使用` | 是否有重复实例或外部轮询者 |
 | `TOKEN 无效或已失效` | TOKEN 是否正确、`api_base` 是否正确 |

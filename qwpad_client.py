@@ -11,10 +11,12 @@
 from __future__ import annotations
 
 import asyncio
+import hashlib
 import mimetypes
 import os
 from dataclasses import dataclass, field
 from typing import Any
+from urllib.parse import urlsplit
 
 import httpx
 
@@ -23,17 +25,23 @@ from astrbot import logger
 DEFAULT_BASE_URL = "https://api.qwpad.com"
 DEFAULT_TIMEOUT = 30.0
 UPLOAD_TIMEOUT = 180.0
+BIG_UPLOAD_TIMEOUT = 600.0
 MAX_DOWNLOAD_BYTES = 50 * 1024 * 1024
+# 普通 CDN 上传必须非空且小于 20MiB（openapi /cloud/cdnBigUpload）。
+MAX_CDN_UPLOAD_BYTES = 20 * 1024 * 1024
 # ``/cloud/files`` 签名地址只认浏览器 UA，httpx 默认 UA 会 403（2026-10-22 实测）。
 BROWSER_UA = (
     "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 "
     "Chrome/126.0 Safari/537.36"
 )
 
-# 上传 fileType 枚举（openapi）：1 图片 JPG / 4 视频 MP4 / 5 普通文件或 SILK 语音
+# 普通上传 fileType 枚举（openapi）：1 图片 JPG / 4 视频 MP4 / 5 普通文件或 SILK 语音
 FILE_TYPE_IMAGE = 1
 FILE_TYPE_VIDEO = 4
 FILE_TYPE_FILE = 5
+# 大文件上传 fileType 枚举（openapi /cloud/cdnBigFileUpload）：22 视频 / 35 文件
+BIG_FILE_TYPE_VIDEO = 22
+BIG_FILE_TYPE_FILE = 35
 
 # msgType（/msg/getMessageTypeList）——只列适配器关心的
 MSG_TEXT = 0
@@ -200,6 +208,15 @@ class EventsPage:
     has_more: bool = False
 
 
+def _md5_file(path: str) -> str:
+    """本地计算 MD5；上传响应缺 fileMd5 时兜底（发送接口要求该字段）。"""
+    digest = hashlib.md5()
+    with open(path, "rb") as fh:
+        for chunk in iter(lambda: fh.read(1024 * 1024), b""):
+            digest.update(chunk)
+    return digest.hexdigest()
+
+
 def _unwrap(payload: Any, path: str) -> Any:
     """解包 ``{code,msg,data}``；成功返回 ``data``。"""
     if not isinstance(payload, dict):
@@ -236,7 +253,10 @@ class QWPadClient:
         self.timeout = timeout
         self._transport = transport
         self._http: httpx.AsyncClient | None = None
+        # 下载走独立客户端：cloudUrl 是对象存储地址，绝不能带业务 TOKEN。
+        self._download_http: httpx.AsyncClient | None = None
         self._lock = asyncio.Lock()
+        self._download_lock = asyncio.Lock()
 
     # ── 生命周期 ────────────────────────────────────────────────────────────
     async def __aenter__(self) -> "QWPadClient":
@@ -264,11 +284,28 @@ class QWPadClient:
                 )
         return self._http
 
+    async def _ensure_download_http(self) -> httpx.AsyncClient:
+        """独立下载客户端：不继承 base_url / Authorization。"""
+        if self._download_http is not None and not self._download_http.is_closed:
+            return self._download_http
+        async with self._download_lock:
+            if self._download_http is None or self._download_http.is_closed:
+                self._download_http = httpx.AsyncClient(
+                    timeout=httpx.Timeout(self.timeout),
+                    headers={"User-Agent": BROWSER_UA},
+                    follow_redirects=True,
+                    transport=self._transport,
+                )
+        return self._download_http
+
     async def close(self) -> None:
         http, self._http = self._http, None
-        if http is not None and not http.is_closed:
+        download_http, self._download_http = self._download_http, None
+        for client in (http, download_http):
+            if client is None or client.is_closed:
+                continue
             try:
-                await http.aclose()
+                await client.aclose()
             except Exception:  # pragma: no cover - 关闭失败不影响退出
                 logger.debug("[QWPad] 关闭 HTTP 客户端失败", exc_info=True)
 
@@ -474,37 +511,168 @@ class QWPadClient:
             "fileMd5": upload.get("fileMd5") or "",
             "fileSize": int(upload.get("fileSize") or 0),
             "filename": filename,
-            "duration": max(0, int(duration or upload.get("durationTime") or 0)),
+            # openapi：duration/coverImageSize 优先复制同次上传的 durationTime/fileThumbSize。
+            "duration": max(0, int(upload.get("durationTime") or duration or 0)),
             "coverImageSize": max(
-                0, int(cover_size or upload.get("fileThumbSize") or 0)
+                0, int(upload.get("fileThumbSize") or cover_size or 0)
             ),
         }
         if reply:
             payload["reply"] = reply
         return await self.post("/msg/sendVideo", payload) or {}
 
+    @staticmethod
+    def _big_upload_fields(upload: dict[str, Any]) -> dict[str, Any]:
+        """校验 BigCDN 上传结果，返回 sendBigFile/sendBigVideo 的公共字段。"""
+        file_id = str(upload.get("fileConvertId") or "").strip()
+        if not file_id.startswith("*1*"):
+            raise QWPadApiError(
+                "大文件上传结果缺少有效的 fileConvertId（*1* 转换 ID）",
+                retryable=False,
+            )
+        md5 = str(upload.get("fileMd5") or "").strip()
+        if len(md5) != 32:
+            raise QWPadApiError(
+                "大文件上传结果缺少有效 fileMd5（32 位十六进制）",
+                retryable=False,
+            )
+        return {
+            "fileId": file_id,
+            # BigCDN 的 fileKey 不是 AES 密钥；没有 AES 材料时显式填空串。
+            "fileAesKey": str(upload.get("fileAesKey") or ""),
+            "fileMd5": md5,
+            "fileSize": int(upload.get("fileSize") or 0),
+        }
+
+    async def send_big_file(
+        self,
+        to_id: str,
+        upload: dict[str, Any],
+        filename: str,
+        reply: dict[str, Any] | None = None,
+    ) -> dict[str, Any]:
+        """``POST /msg/sendBigFile``：发送来自 ``cdnBigFileUpload`` 的文件。"""
+        payload: dict[str, Any] = {
+            "toId": str(to_id),
+            "filename": filename,
+            **self._big_upload_fields(upload),
+        }
+        if reply:
+            payload["reply"] = reply
+        return await self.post("/msg/sendBigFile", payload) or {}
+
+    async def send_big_video(
+        self,
+        to_id: str,
+        upload: dict[str, Any],
+        filename: str,
+        reply: dict[str, Any] | None = None,
+    ) -> dict[str, Any]:
+        """``POST /msg/sendBigVideo``：发送来自 ``cdnBigFileUpload`` 的视频。"""
+        preview = str(upload.get("previewImgUrl") or "")
+        payload: dict[str, Any] = {
+            "toId": str(to_id),
+            "filename": filename,
+            "previewImgUrl": preview,
+            # openapi：previewImgUrl 为空时 coverImageSize 必须为 0。
+            "coverImageSize": int(upload.get("PreviewImgSize") or 0) if preview else 0,
+            "duration": max(0, int(upload.get("duration") or 0)),
+            **self._big_upload_fields(upload),
+        }
+        if reply:
+            payload["reply"] = reply
+        return await self.post("/msg/sendBigVideo", payload) or {}
+
+    def _check_upload_size(self, path: str, file_type: int) -> int:
+        if not os.path.isfile(path):
+            raise QWPadApiError(f"上传失败：文件不存在 {path}", retryable=False)
+        size = os.path.getsize(path)
+        if size <= 0:
+            raise QWPadApiError(
+                f"上传失败：文件为空 {os.path.basename(path)}", retryable=False
+            )
+        if file_type == FILE_TYPE_IMAGE and size >= MAX_CDN_UPLOAD_BYTES:
+            raise QWPadApiError(
+                f"图片 {os.path.basename(path)} 为 {size} 字节，超过普通 CDN 上传上限 "
+                f"{MAX_CDN_UPLOAD_BYTES} 字节；QWPad 无大图片接口，请先压缩图片",
+                retryable=False,
+            )
+        if file_type in (FILE_TYPE_VIDEO, FILE_TYPE_FILE) and size >= MAX_CDN_UPLOAD_BYTES:
+            raise QWPadApiError(
+                f"文件 {os.path.basename(path)} 为 {size} 字节，超过普通 CDN 上传上限 "
+                f"{MAX_CDN_UPLOAD_BYTES} 字节，请改用 upload_big_file",
+                retryable=False,
+            )
+        return size
+
+    @staticmethod
+    def _fill_upload_metadata(
+        data: dict[str, Any], path: str, size: int
+    ) -> dict[str, Any]:
+        if not data.get("fileSize"):
+            data["fileSize"] = size
+        if not data.get("fileMd5"):
+            data["fileMd5"] = _md5_file(path)
+        return data
+
     async def upload_file(
         self, path: str, file_type: int = FILE_TYPE_FILE
     ) -> dict[str, Any]:
-        """``POST /cloud/cdnBigUpload``（multipart）→ 上传凭证。"""
-        if not os.path.isfile(path):
-            raise QWPadApiError(f"上传失败：文件不存在 {path}", retryable=False)
+        """``POST /cloud/cdnBigUpload``（multipart）→ 上传凭证。
+
+        普通 CDN 要求非空且 **小于 20MiB**；更大的视频/文件请用
+        :meth:`upload_big_file`（``/cloud/cdnBigFileUpload``）。
+        文件以句柄流式提交，避免把大文件整体读入内存。
+        """
+        size = self._check_upload_size(path, file_type)
         name = os.path.basename(path) or "file"
         mime = mimetypes.guess_type(name)[0] or "application/octet-stream"
         with open(path, "rb") as fh:
-            body = fh.read()
-        if not body:
-            raise QWPadApiError(f"上传失败：文件为空 {name}", retryable=False)
-        return (
-            await self._request(
+            data = await self._request(
                 "POST",
                 "/cloud/cdnBigUpload",
-                files={"file": (name, body, mime)},
+                files={"file": (name, fh, mime)},
                 data={"fileType": str(int(file_type))},
                 timeout=UPLOAD_TIMEOUT,
             )
-            or {}
-        )
+        return self._fill_upload_metadata(dict(data or {}), path, size)
+
+    async def upload_big_file(
+        self, path: str, file_type: int = BIG_FILE_TYPE_FILE
+    ) -> dict[str, Any]:
+        """``POST /cloud/cdnBigFileUpload``（multipart）→ BigCDN 凭证。
+
+        ``file_type``：22 视频 / 35 文件。返回值中的 ``fileConvertId`` 是发送
+        ``/msg/sendBigFile|sendBigVideo`` 所需的 ``*1*`` 文件 ID。
+        """
+        if file_type not in (BIG_FILE_TYPE_FILE, BIG_FILE_TYPE_VIDEO):
+            raise QWPadApiError(
+                f"大文件上传 fileType 只能是 35（文件）或 22（视频），收到 {file_type}",
+                retryable=False,
+            )
+        if not os.path.isfile(path):
+            raise QWPadApiError(f"上传失败：文件不存在 {path}", retryable=False)
+        size = os.path.getsize(path)
+        if size <= 0:
+            raise QWPadApiError(
+                f"上传失败：文件为空 {os.path.basename(path)}", retryable=False
+            )
+        name = os.path.basename(path) or "file"
+        mime = mimetypes.guess_type(name)[0] or "application/octet-stream"
+        with open(path, "rb") as fh:
+            data = await self._request(
+                "POST",
+                "/cloud/cdnBigFileUpload",
+                files={"file": (name, fh, mime)},
+                data={"fileType": str(int(file_type))},
+                timeout=BIG_UPLOAD_TIMEOUT,
+            )
+        data = dict(data or {})
+        if not str(data.get("fileConvertId") or "").strip():
+            raise QWPadApiError(
+                "大文件上传成功但未返回 fileConvertId，无法发送", retryable=False
+            )
+        return self._fill_upload_metadata(data, path, size)
 
     async def download_wxwork_file(self, ref: dict[str, Any]) -> bytes | None:
         """``/cloud/wxWorkDownload`` 拿 cloudUrl，再把字节取回。"""
@@ -580,11 +748,18 @@ class QWPadClient:
     async def _download_url(
         self, url: str, max_bytes: int = MAX_DOWNLOAD_BYTES
     ) -> bytes:
-        http = await self._ensure_http()
+        parts = urlsplit(str(url or ""))
+        if parts.scheme not in ("http", "https"):
+            raise QWPadApiError(
+                "下载地址不是 HTTP(S)（"
+                f"{parts.scheme or '无协议'}）；QWPad 存储未开启 HTTP 出口时"
+                "会返回 fs:// 对象引用，需部署方启用本地下载出口",
+                retryable=False,
+            )
+        # 独立无鉴权客户端：cloudUrl 属于对象存储，不能收到 Bearer TOKEN。
+        http = await self._ensure_download_http()
         try:
-            async with http.stream(
-                "GET", url, headers={"User-Agent": BROWSER_UA}
-            ) as response:
+            async with http.stream("GET", url) as response:
                 response.raise_for_status()
                 chunks: list[bytes] = []
                 total = 0
@@ -630,6 +805,8 @@ class QWPadClient:
 
 
 __all__ = [
+    "BIG_FILE_TYPE_FILE",
+    "BIG_FILE_TYPE_VIDEO",
     "BROWSER_UA",
     "DEFAULT_BASE_URL",
     "DEFAULT_TIMEOUT",
@@ -637,6 +814,7 @@ __all__ = [
     "FILE_TYPE_FILE",
     "FILE_TYPE_IMAGE",
     "FILE_TYPE_VIDEO",
+    "MAX_CDN_UPLOAD_BYTES",
     "MSG_TYPE_NAMES",
     "QWPadApiError",
     "QWPadAuthError",

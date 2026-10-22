@@ -19,12 +19,10 @@ from __future__ import annotations
 
 import asyncio
 import contextlib
-import json
 import math
 import os
 import re
 import shutil
-import subprocess
 from typing import Any
 
 from astrbot import logger
@@ -42,9 +40,12 @@ from astrbot.api.message_components import (
 )
 
 from .qwpad_client import (
+    BIG_FILE_TYPE_FILE,
+    BIG_FILE_TYPE_VIDEO,
     FILE_TYPE_FILE,
     FILE_TYPE_IMAGE,
     FILE_TYPE_VIDEO,
+    MAX_CDN_UPLOAD_BYTES,
     QWPadClient,
     QWPadError,
 )
@@ -217,6 +218,54 @@ async def _probe_video(path: str) -> tuple[int, int]:
         return 0, 0
 
 
+def _needs_big_upload(path: str) -> bool:
+    """普通 CDN 要求 <20MiB；达到/超过时改走 BigCDN。"""
+    try:
+        return os.path.getsize(path) >= MAX_CDN_UPLOAD_BYTES
+    except OSError:
+        return False
+
+
+async def _send_file_path(
+    client: QWPadClient,
+    chat_id: str,
+    path: str,
+    name: str,
+    *,
+    reply: dict[str, Any] | None,
+) -> None:
+    if _needs_big_upload(path):
+        upload = await client.upload_big_file(path, BIG_FILE_TYPE_FILE)
+        await client.send_big_file(chat_id, upload, name, reply=reply)
+        return
+    upload = await client.upload_file(path, FILE_TYPE_FILE)
+    await client.send_file(chat_id, upload, name, reply=reply)
+
+
+async def _send_video_path(
+    client: QWPadClient,
+    chat_id: str,
+    path: str,
+    name: str,
+    *,
+    reply: dict[str, Any] | None,
+) -> None:
+    if _needs_big_upload(path):
+        upload = await client.upload_big_file(path, BIG_FILE_TYPE_VIDEO)
+        await client.send_big_video(chat_id, upload, name, reply=reply)
+        return
+    duration, cover = await _probe_video(path)
+    upload = await client.upload_file(path, FILE_TYPE_VIDEO)
+    await client.send_video(
+        chat_id,
+        upload,
+        name,
+        duration=duration,
+        cover_size=cover,
+        reply=reply,
+    )
+
+
 async def _send_media_component(
     client: QWPadClient,
     chat_id: str,
@@ -239,9 +288,12 @@ async def _send_media_component(
         encoded = await encode_voice_to_silk(path)
         if encoded is None:
             logger.warning("[QWPad] SILK 编码不可用，语音降级为文件: %s", path)
-            upload = await client.upload_file(path, FILE_TYPE_FILE)
-            await client.send_file(
-                chat_id, upload, safe_filename(os.path.basename(path), "voice.amr"), reply=reply
+            await _send_file_path(
+                client,
+                chat_id,
+                path,
+                safe_filename(os.path.basename(path), "voice.amr"),
+                reply=reply,
             )
             return True
         silk, voice_time = encoded
@@ -258,14 +310,11 @@ async def _send_media_component(
 
     if isinstance(component, Video):
         path = await component.convert_to_file_path()
-        duration, cover = await _probe_video(path)
-        upload = await client.upload_file(path, FILE_TYPE_VIDEO)
-        await client.send_video(
+        await _send_video_path(
+            client,
             chat_id,
-            upload,
+            path,
             safe_filename(os.path.basename(path), "video.mp4"),
-            duration=duration,
-            cover_size=cover or int(upload.get("fileThumbSize") or 0),
             reply=reply,
         )
         return True
@@ -275,8 +324,7 @@ async def _send_media_component(
         if not path:
             raise QWPadError("文件组件没有可读取的文件", retryable=False)
         name = safe_filename(component.name or os.path.basename(path), "file")
-        upload = await client.upload_file(path, FILE_TYPE_FILE)
-        await client.send_file(chat_id, upload, name, reply=reply)
+        await _send_file_path(client, chat_id, path, name, reply=reply)
         return True
 
     return False

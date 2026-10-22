@@ -14,7 +14,6 @@ import re
 import shutil
 import tempfile
 from pathlib import Path
-from typing import Any
 
 from astrbot import logger
 

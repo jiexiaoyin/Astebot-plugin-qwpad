@@ -1,5 +1,31 @@
 # Changelog
 
+## 0.2.1 — 2026-10-22
+
+对照 QWPad OpenAPI（`https://api.qwpad.com/openapi.json`）逐项校正。
+
+### 修复
+
+- **在线判定**：`errorCode=0` 只表示状态查询成功，真正在线必须
+  `userOnlineStatus=2`。启动时账号不在线会明确报错（含具体状态值），运行时
+  掉线告警也只按该字段判断；状态接口新增 `account.online`。
+- **下载鉴权隔离**：`cloudUrl` 属于对象存储，改用独立的无鉴权 HTTP 客户端下载，
+  不再把业务 TOKEN 发给第三方 CDN；`fs://` 对象引用会给出明确错误（存储未开启
+  HTTP 出口），不再拼 TOKEN/AES/fileId。
+- **大文件出站**：普通 CDN 上传要求文件非空且小于 20MiB。视频/文件达到 20MiB
+  自动改走 `cdnBigFileUpload`（`fileType` 22/35）→ `sendBigFile`/`sendBigVideo`；
+  图片没有大文件接口，超限直接报错并提示压缩。
+- **上传内存占用**：普通上传改为文件句柄流式提交，不再整个读入内存；上传结果
+  缺失 `fileSize`/`fileMd5` 时本地补齐，避免发出空必填字段。
+- **视频元数据**：`sendVideo` 的 `duration`/`coverImageSize` 优先复制同次上传的
+  `durationTime`/`fileThumbSize`，ffprobe 仅作兜底。
+- **引用窗口**：`QUOTE_WINDOW_S` 真正生效，过期锚点不再被引用。
+
+### 测试
+
+- 新增 9 个客户端契约测试与适配器/发送回归测试，覆盖下载不带 TOKEN、`fs://`、
+  BigCDN 上传与发送、视频元数据、20MiB 分流、在线状态判定、引用过期。
+
 ## 0.2.0 — 2026-10-22
 
 ### 变更
