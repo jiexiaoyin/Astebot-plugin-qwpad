@@ -14,6 +14,7 @@ from __future__ import annotations
 
 import asyncio
 import contextlib
+import os
 import time
 from typing import Any
 
@@ -560,6 +561,16 @@ class QWPadAdapter(Platform):
                     if not base or base == inbox.placeholder
                     else f"{base}\n{transcript}"
                 )
+                # 已有转写文本时不再把 WAV 交给模型：部分模型会尝试读取二进制、
+                # 执行 shell 去“解析音频”，反而忽略正文。语音文件直接清理。
+                kept = []
+                for entry in downloaded:
+                    if entry[2] == "voice":
+                        with contextlib.suppress(OSError):
+                            os.unlink(entry[1])
+                    else:
+                        kept.append(entry)
+                downloaded = kept
 
         chat_name = await self._chat_name(inbox)
         message = self._build_message(inbox, chat_name, downloaded)

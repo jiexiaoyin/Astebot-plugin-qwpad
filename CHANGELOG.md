@@ -27,7 +27,8 @@
 
 - **入站语音转文字**：调用 QWPad `/msg/voiceToTextApply` + `/msg/voiceToTextQuery`，
   用消息的 `msgServerId`/`seq` 提交任务并轮询结果；识别文本作为正文交给模型，
-  语音附件仍保留。转写失败/超时（20 秒）只记 WARN，不阻塞消息；可用
+  转写成功时不再附带 WAV（避免模型尝试读取二进制/执行 shell 解析音频），失败时
+  保留语音附件。转写失败/超时（20 秒）只记 WARN，不阻塞消息；可用
   `voice_to_text=false` 关闭。此前 AstrBot 未配置 STT 时，模型只能拿到
   `Record` 组件，无法理解语音内容。
 

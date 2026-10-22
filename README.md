@@ -113,8 +113,9 @@ QWPad 的 `wxa_` TOKEN 与企业微信账号一一对应。插件按平台实例
 - 文本、富文本、Markdown、链接、位置、名片/卡片、合并转发、引用消息；
 - 图片、表情、语音、视频、文件；合并转发中的媒体也会尝试下载；
 - 入站语音 SILK → WAV（需要 `pilk`），并调用 QWPad
-  `/msg/voiceToTextApply|Query` 自动转文字，把识别文本交给模型；转写失败时
-  保留语音附件，不影响消息处理（可用 `voice_to_text=false` 关闭）；
+  `/msg/voiceToTextApply|Query` 自动转文字；转写成功时只把文本交给模型（不再
+  附带 WAV，避免模型尝试读取二进制），失败时保留语音附件，不影响消息处理
+  （可用 `voice_to_text=false` 关闭）；
 - 群聊 @ 识别、发送者昵称/群名查询（带缓存，查询失败不影响消息）。
 
 ### 3.2 发消息
@@ -264,7 +265,7 @@ AstrBot Dashboard → 平台配置 → `wecom(Pad)` 实例。
 | `allow_all_users` | bool | `false` | 放开所有聊天（仍受黑名单约束，非聊天事件仍丢弃）；仅调试/内部账号 |
 | `group_reply` | string | `atbot` | `atbot`=只放行 @ 我的群消息；`all`=放行全部群消息；`none`=忽略所有群消息 |
 | `quote_replies` | bool | `true` | 回复时引用触发消息；仅文本/富文本原消息可引用 |
-| `voice_to_text` | bool | `true` | 入站语音调用 QWPad 转文字；失败时保留语音附件，不影响消息 |
+| `voice_to_text` | bool | `true` | 入站语音调用 QWPad 转文字；失败时保留语音附件，不影响消息。若已启用 AstrBot 全局「语音识别」STT，建议设为 `false`，由 AstrBot 统一转写 |
 | `strip_markdown` | bool | `true` | 发送前清洗 Markdown（粗体、标题、链接、代码等转纯文本） |
 | `poll_wait_seconds` | int | `25` | long-poll 等待秒数，范围 1–30；越小越实时，请求越多 |
 | `poll_limit` | int | `50` | 单次拉取事件上限，范围 1–500 |
@@ -372,7 +373,7 @@ AstrBot Dashboard → 平台配置 → `wecom(Pad)` 实例。
 | 类型 | 入站 | 出站 |
 | --- | --- | --- |
 | 图片 | 下载后以 `Image` 交给模型 | 上传 → `sendImage` |
-| 语音 | SILK → WAV（`pilk`）+ QWPad 语音转文字；失败按文件/仅保留附件 | `ffmpeg` → 24kHz PCM → SILK，≤60KB；超限自动降码率 |
+| 语音 | SILK → WAV（`pilk`）+ QWPad 语音转文字；成功只发文本，失败保留音频/文件 | `ffmpeg` → 24kHz PCM → SILK，≤60KB；超限自动降码率 |
 | 视频 | 下载后以 `Video` 交给模型 | `<20MiB`：上传 → `sendVideo`；`≥20MiB`：BigCDN → `sendBigVideo` |
 | 文件 | 下载后以 `File` 交给模型 | `<20MiB`：上传 → `sendFile`；`≥20MiB`：BigCDN → `sendBigFile` |
 | 位置/链接/卡片 | 转成可读文本 | 不支持结构化发送，退化为文本 |
@@ -382,8 +383,8 @@ AstrBot Dashboard → 平台配置 → `wecom(Pad)` 实例。
   BigCDN（`fileType` 22/35），图片没有大文件接口，超过上限会明确报错并提示压缩；
 - 上传以文件句柄流式提交，不会把整个大文件读入内存；
 - 语音编码需要 `ffmpeg` + `pilk`，任一缺失时出站语音降级为文件；
-- 入站语音转文字依赖 QWPad 服务，最多等待 20 秒；超时/失败只记 WARN，消息仍会
-  带着语音附件进入 AstrBot；
+- 入站语音转文字依赖 QWPad 服务，最多等待 20 秒；成功时以文本代替音频附件，
+  超时/失败只记 WARN，消息仍会带着语音附件进入 AstrBot；
 - 入站媒体下载到临时目录，事件处理结束后由 AstrBot 清理。
 
 ### 9.5 引用回复

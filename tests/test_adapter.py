@@ -2,7 +2,7 @@ import asyncio
 
 import pytest
 from astrbot.api.event import MessageChain
-from astrbot.api.message_components import At, Plain, Reply
+from astrbot.api.message_components import At, Plain, Record, Reply
 
 from qwpad_plugin.qwpad_adapter import (
     QUOTE_WINDOW_S,
@@ -201,6 +201,40 @@ def test_voice_message_uses_qwpad_transcript():
         isinstance(c, Plain) and c.text == "明天天气怎么样"
         for c in event.message_obj.message
     )
+
+
+def test_transcribed_voice_omits_record_attachment(monkeypatch, tmp_path):
+    """有转写文本时不再把 WAV 交给模型，避免模型去读二进制。"""
+    from qwpad_plugin import qwpad_adapter
+    from qwpad_plugin.qwpad_client import MSG_VOICE_CDN
+
+    voice_file = tmp_path / "voice.wav"
+    voice_file.write_bytes(b"RIFF")
+
+    async def fake_cache(client, ref):
+        return str(voice_file), "voice"
+
+    monkeypatch.setattr(qwpad_adapter, "cache_media", fake_cache)
+    adapter = _adapter()
+    adapter._client = FakeClient()
+    item = _group_item()
+    item["message"]["msgType"] = MSG_VOICE_CDN
+    item["message"]["structured"]["msgType"] = MSG_VOICE_CDN
+    item["message"]["structured"]["msgServerId"] = 123
+    item["message"]["structured"]["msgData"] = {
+        "fileId": "voice-fid",
+        "voiceTime": 3,
+        "atList": [{"userId": "999"}],
+    }
+    item["display"]["messageType"] = {"nativeName": "kVoiceCDN"}
+    item["display"]["parseStatus"] = "parsed_media"
+
+    asyncio.run(adapter._handle_event_item(item))
+
+    event = adapter._event_queue.get_nowait()
+    assert not any(isinstance(c, Record) for c in event.message_obj.message)
+    assert event.message_obj.message_str == "明天天气怎么样"
+    assert not voice_file.exists()
 
 
 def test_dispatch_failure_does_not_lose_message(monkeypatch):

@@ -239,8 +239,12 @@ curl -s -X POST http://127.0.0.1:6185/api/plug/astrbot-plugin-qwpad/status \
 ### 5.4 媒体验证（可选）
 
 - 私聊发图片/文件/语音，确认日志 `media=1` 且模型能收到；
-- 发一条语音，确认日志出现 `语音转文字成功 msgServerId=... len=...`，且机器人
-  回复内容与语音相符；转写失败会记 `语音转文字失败，保留语音附件`（不影响消息）；
+- 发一条语音，确认机器人回复内容与语音相符：
+  - 使用插件转写（`voice_to_text=true`，默认）：日志出现
+    `语音转文字成功 msgServerId=... len=...`，事件只带转写文本、不再附带 WAV；
+    失败会记 `语音转文字失败，保留语音附件`（不影响消息）；
+  - 使用 AstrBot 全局 STT（`provider_stt_settings.enable=true`）：把平台配置的
+    `voice_to_text` 设为 `false`，日志出现 `Speech-to-text result: ...`；
 - 让机器人回复语音，确认收到语音气泡而不是文件；
 - 出站语音失败时检查 `ffmpeg`/`pilk`；入站转写失败检查 QWPad 服务与网络；
 - 出站普通 CDN 上传必须 **小于 20MiB**：小于该值的视频/文件走
