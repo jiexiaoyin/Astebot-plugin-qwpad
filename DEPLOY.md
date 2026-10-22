@@ -40,11 +40,41 @@ rsync -a --exclude='.git' --exclude='tests' --exclude='__pycache__' \
   "poll_limit": 50,
   "max_message_length": 2000,
   "startup_backlog_minutes": 5,
-  "type": "qwpad",
+  "type": "wecom(Pad)",
   "enable": true,
-  "id": "qwpad"
+  "id": "wecom(Pad)"
 }
 ```
+
+### 多账号
+
+**一个平台实例 = 一个 TOKEN = 一个企业微信账号。** 多账号时在 `platform` 数组里
+再追加一个平台对象，`id` 全平台唯一（如 `wecom(Pad)-shop2`），`token` 填另一个账号：
+
+```json
+{
+  "type": "wecom(Pad)",
+  "enable": true,
+  "id": "wecom(Pad)-shop2",
+  "token": "wxa_bbb",
+  "api_base": "https://api.qwpad.com",
+  "allow_users": "788...",
+  "group_reply": "atbot",
+  "quote_replies": true,
+  "strip_markdown": true,
+  "poll_wait_seconds": 25,
+  "poll_limit": 50,
+  "max_message_length": 2000,
+  "startup_backlog_minutes": 5
+}
+```
+
+每个实例独立轮询、游标目录 `data/plugin_data/astrbot-plugin-qwpad/<id>/`、白名单/
+群策略和收发统计。
+
+同一个 TOKEN 不要配置成两个实例：插件会拒绝后启动的实例（日志提示
+`同一 TOKEN 已被平台实例 ... 使用`），因为两个轮询会互抢事件与游标。
+TOKEN 不能复用于多个账号，也不存在「一个 TOKEN 下挂多个账号」的配置。
 
 改动前备份：
 
@@ -63,8 +93,8 @@ docker logs --since 3m astrbot 2>&1 | grep -iE 'qwpad|platform'
 
 ```
 Loading plugin astrbot-plugin-qwpad ...
-Loading IM platform adapter qwpad(qwpad) ...
-[QWPad:qwpad] 已连接 <昵称>（<企业> / <userId>），游标 <n>，策略 ...
+Loading IM platform adapter wecom(Pad)(wecom(Pad)) ...
+[QWPad:wecom(Pad)] 已连接 <昵称>（<企业> / <userId>），游标 <n>，策略 ...
 ```
 
 首次启动且白名单为空时会有一条「所有消息都会被拒绝」的 WARN —— 这是安全默认值，不是故障。

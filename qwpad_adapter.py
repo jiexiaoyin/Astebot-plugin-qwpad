@@ -1,7 +1,8 @@
 """QWPad（企业微信 pad 协议）AstrBot 平台适配器。
 
-一个 TOKEN = 一个企业微信账号；一个平台实例 = 一个 TOKEN。
-多账号请在 AstrBot 里添加多个 QWPad 平台实例（每个填不同 TOKEN）。
+一个 TOKEN = 一个企业微信账号 = 一个平台实例。多账号请在 AstrBot 里添加多个
+QWPad 平台实例（``id`` 唯一，各自一个 TOKEN），每个实例独立轮询/游标/客户端/
+策略/统计；同一 TOKEN 不允许被两个实例同时使用。
 
 收消息：``GET /events`` long-poll（unified），游标持久化，重启不重放。
 发消息：``/msg/sendText|sendHyperText|sendImage|sendFile|sendVoice|sendVideo``。
@@ -47,7 +48,7 @@ from .qwpad_storage import (
     token_fingerprint,
 )
 
-PLATFORM_NAME = "qwpad"
+PLATFORM_NAME = "wecom(Pad)"
 PLATFORM_DESCRIPTION = "QWPad 企业微信 pad 协议适配器"
 STATUS_CHECK_INTERVAL_S = 300.0
 NAME_CACHE_TTL_S = 900.0
@@ -55,12 +56,13 @@ NAME_CACHE_TTL_S = 900.0
 QUOTE_WINDOW_S = 600.0
 MAX_FORWARD_REFS = 10
 
+
 QWPad_CONFIG_METADATA: dict[str, dict[str, Any]] = {
     "token": {
         "description": "QWPad 业务 TOKEN（wxa_ 前缀）",
         "type": "string",
         "secret": True,
-        "hint": "一个 TOKEN 对应一个企业微信账号。获取：https://api.qwpad.com/",
+        "hint": "一个 TOKEN 对应一个企业微信账号。多账号请再添加一个「wecom(Pad)」平台实例，id 唯一、各自填 TOKEN。",
     },
     "api_base": {
         "description": "QWPad API 地址",
@@ -133,7 +135,8 @@ QWPad_CONFIG_METADATA: dict[str, dict[str, Any]] = {
 @register_platform_adapter(
     PLATFORM_NAME,
     PLATFORM_DESCRIPTION,
-    adapter_display_name="企业微信 QWPad",
+    adapter_display_name="wecom(Pad)",
+    logo_path="logo.png",
     default_config_tmpl={
         "token": "",
         "api_base": DEFAULT_BASE_URL,
@@ -154,7 +157,7 @@ QWPad_CONFIG_METADATA: dict[str, dict[str, Any]] = {
     support_streaming_message=False,
 )
 class QWPadAdapter(Platform):
-    """单 TOKEN 单实例的 QWPad 适配器。"""
+    """QWPad 适配器：一个平台实例对应一个 TOKEN / 一个企业微信账号。"""
 
     # 进程内 token 占用表：同一 TOKEN 只能有一个实例轮询（否则游标/消息会重复）。
     _ACTIVE_TOKENS: dict[str, str] = {}
@@ -194,7 +197,7 @@ class QWPadAdapter(Platform):
             name=PLATFORM_NAME,
             description=PLATFORM_DESCRIPTION,
             id=self.instance_id,
-            adapter_display_name="企业微信 QWPad",
+            adapter_display_name="wecom(Pad)",
             support_streaming_message=False,
             support_proactive_message=True,
             module_path=__name__,
@@ -228,8 +231,8 @@ class QWPadAdapter(Platform):
         return self.metadata
 
     def create_event(self, message: AstrBotMessage) -> QWPadMessageEvent:
-        chat_id = str(getattr(message, "session_id", "") or "")
-        anchor = self._pending_reply.pop(chat_id, None)
+        session_id = str(getattr(message, "session_id", "") or "")
+        anchor = self._pending_reply.pop(session_id, None)
         reply_anchor = None
         if anchor and self._anchor_is_quotable(anchor[1]):
             reply_anchor = anchor[1]
@@ -237,10 +240,10 @@ class QWPadAdapter(Platform):
             message_str=message.message_str,
             message_obj=message,
             platform_meta=self.meta(),
-            session_id=chat_id,
+            session_id=session_id,
             client=self._client,
             adapter=self,
-            chat_id=chat_id,
+            chat_id=session_id,
             reply_anchor=reply_anchor,
         )
 

@@ -1,5 +1,6 @@
 import asyncio
 
+import pytest
 from astrbot.api.event import MessageChain
 from astrbot.api.message_components import At, Plain, Reply
 
@@ -145,6 +146,106 @@ def test_event_send_records_outbound_count(caplog):
     # 发送成功路径不能触发被吞掉的异常日志（曾因局部 import logger 触发
     # UnboundLocalError，测试仍绿但线上每次发送都报错）。
     assert "发送消息异常" not in caplog.text
+
+
+class _NamedClient(FakeClient):
+    def __init__(self, name):
+        super().__init__()
+        self.name = name
+
+
+def _dm_item_for(user_id, text):
+    item = _dm_item()
+    item["display"]["senderId"] = user_id
+    item["message"]["structured"]["senderId"] = user_id
+    item["message"]["structured"]["msgData"] = {"content": text}
+    return item
+
+
+def test_multiple_instances_are_isolated():
+    """多账号 = 多个平台实例：客户端/游标/策略/统计互不串线。"""
+    a = QWPadAdapter(
+        {
+            "id": "qwpad-a",
+            "token": "wxa_account_a",
+            "allow_all_users": True,
+            "group_reply": "atbot",
+        },
+        {},
+        asyncio.Queue(),
+    )
+    b = QWPadAdapter(
+        {
+            "id": "qwpad-b",
+            "token": "wxa_account_b",
+            "allow_all_users": True,
+            "group_reply": "none",
+        },
+        {},
+        asyncio.Queue(),
+    )
+    for adapter, self_id, nick in ((a, "9001", "助理A"), (b, "9002", "助理B")):
+        adapter._self_id = self_id
+        adapter._self_nick = nick
+        adapter._client = _NamedClient(adapter.instance_id)
+        adapter.policy = PolicySnapshot(
+            allow_all_users=True, group_reply=adapter.config["group_reply"]
+        )
+
+    event_a = a.create_event(
+        a._build_message(
+            parse_event(_dm_item_for("1001", "给A"), self_id="9001", self_nick="助理A"),
+            "张三",
+            [],
+        )
+    )
+    event_b = b.create_event(
+        b._build_message(
+            parse_event(_dm_item_for("1001", "给B"), self_id="9002", self_nick="助理B"),
+            "张三",
+            [],
+        )
+    )
+    asyncio.run(event_a.send(MessageChain([Plain("A的回复")])))
+    asyncio.run(event_b.send(MessageChain([Plain("B的回复")])))
+
+    assert event_a.message_obj.self_id == "9001"
+    assert event_b.message_obj.self_id == "9002"
+    assert [t["content"] for t in a._client.texts] == ["A的回复"]
+    assert [t["content"] for t in b._client.texts] == ["B的回复"]
+    assert a.policy.group_reply == "atbot"
+    assert b.policy.group_reply == "none"
+    assert a.get_stats()["messages_out"] == 1
+    assert b.get_stats()["messages_out"] == 1
+    # 游标目录按平台实例隔离
+    from qwpad_plugin.qwpad_storage import instance_dir, token_fingerprint
+
+    assert instance_dir(a.instance_id) != instance_dir(b.instance_id)
+    assert token_fingerprint(a.token) != token_fingerprint(b.token)
+
+
+def test_same_token_cannot_run_twice():
+    """同一 TOKEN 只能有一个平台实例在跑，否则会互抢游标/重复回复。"""
+    a = QWPadAdapter({"id": "qwpad-a", "token": "wxa_same"}, {}, asyncio.Queue())
+    b = QWPadAdapter({"id": "qwpad-b", "token": "wxa_same"}, {}, asyncio.Queue())
+    from qwpad_plugin.qwpad_storage import token_fingerprint
+
+    fp = token_fingerprint("wxa_same")
+    QWPadAdapter._ACTIVE_TOKENS[fp] = a.instance_id
+    try:
+        import pytest
+
+        with pytest.raises(RuntimeError, match="同一 TOKEN"):
+            asyncio.run(b.run())
+    finally:
+        QWPadAdapter._ACTIVE_TOKENS.pop(fp, None)
+
+
+def test_platform_metadata_name_is_wecom_pad():
+    """AstrBot 4.29 的机器人列表/新增下拉直接显示适配器名，必须是 wecom(Pad)。"""
+    meta = _adapter().meta()
+    assert meta.name == "wecom(Pad)"
+    assert meta.adapter_display_name == "wecom(Pad)"
 
 
 def test_get_stats_follows_base_contract():

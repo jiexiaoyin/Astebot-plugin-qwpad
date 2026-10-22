@@ -39,11 +39,11 @@ rsync -a --exclude='.git' --exclude='tests' --exclude='__pycache__' \
 
 ## 配置
 
-AstrBot Dashboard → 平台配置 → 新增「企业微信 QWPad」。字段说明：
+AstrBot Dashboard → 平台配置 → 新增「wecom(Pad)」。字段说明：
 
 | 字段 | 默认 | 说明 |
 | --- | --- | --- |
-| `token` | — | QWPad 业务 TOKEN（`wxa_` 前缀），必填 |
+| `token` | — | QWPad 业务 TOKEN（`wxa_` 前缀）；一个 TOKEN 对应一个企业微信账号 |
 | `api_base` | `https://api.qwpad.com` | 私有化部署时改这里 |
 | `allow_users` | 空 | 私聊/群成员白名单，userId 逗号分隔 |
 | `allow_groups` | 空 | 群白名单，roomId 逗号分隔 |
@@ -57,6 +57,21 @@ AstrBot Dashboard → 平台配置 → 新增「企业微信 QWPad」。字段�
 | `poll_limit` | `50` | 单次拉取条数，范围 1–500 |
 | `max_message_length` | `2000` | 单条文本上限，超长自动分片 |
 | `startup_backlog_minutes` | `5` | 首次启动（无游标）只处理最近 N 分钟，`0`=处理全部积压 |
+
+### 多账号
+
+**一个平台实例 = 一个 TOKEN = 一个企业微信账号。** 多账号请添加多个平台实例：
+
+Dashboard → 平台配置 → 再新增一个「wecom(Pad)」，`id` 唯一（如 `wecom(Pad)-shop2`），
+`token` 填另一个账号的 TOKEN。每个实例独立轮询、游标、白名单/群策略和收发统计。
+
+```text
+平台实例 wecom(Pad)         (TOKEN A) ── 账号 A
+平台实例 wecom(Pad)-shop2   (TOKEN B) ── 账号 B
+```
+
+**同一个 TOKEN 只允许一个轮询者**：重复配置会在启动时被拒绝，避免两个实例抢同一
+账号的事件和游标。TOKEN 不能复用，也不存在「一个 TOKEN 下挂多个账号」的配置。
 
 ### 准入 ≠ 唤醒
 
@@ -98,7 +113,8 @@ AstrBot Dashboard → 平台配置 → 新增「企业微信 QWPad」。字段�
 
 `POST /api/plug/astrbot-plugin-qwpad/status`（需要 Dashboard 登录态）
 
-请求体可选 `{"platform_id": "qwpad"}`。返回在线状态、账号、游标、收发计数、当前策略与最近错误；**不会返回 TOKEN**。
+请求体可选 `{"platform_id": "wecom(Pad)"}`。返回在线状态、账号、游标、收发计数、当前策略与最近错误；
+多平台实例时每个实例一条记录；**不会返回 TOKEN**。
 
 ## 媒体说明
 
@@ -116,7 +132,8 @@ AstrBot Dashboard → 平台配置 → 新增「企业微信 QWPad」。字段�
 - 企业微信没有消息编辑能力：`support_streaming_message=False`，流式输出会先聚合再一次性发送。
 - 引用发送：QWPad 要求 `sendHyperText` 带一个空文本段，否则只显示引用不显示正文；插件已处理。
 - 引用仅对文本/富文本原消息生效；发送失败自动退回普通文本。
-- 单账号 TOKEN 独占，无法多实例负载均衡。
+- 一个 TOKEN 只能对应一个平台实例；多账号请添加多个平台实例（见「多账号」）。
+  同一账号不支持多实例负载均衡或主备切换。
 
 ## 开发与测试
 
