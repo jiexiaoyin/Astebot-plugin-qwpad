@@ -166,6 +166,28 @@ def _dm_item_for(user_id, text):
     return item
 
 
+def test_dispatch_failure_does_not_lose_message(monkeypatch):
+    """分发抛错时不能提前去重，否则重试会被当成重复消息丢弃。"""
+    adapter = _adapter()
+    original = adapter._dispatch
+    attempts = []
+
+    async def flaky_dispatch(inbox):
+        attempts.append(inbox.message_id)
+        if len(attempts) == 1:
+            raise RuntimeError("temporary failure")
+        await original(inbox)
+
+    monkeypatch.setattr(adapter, "_dispatch", flaky_dispatch)
+    with pytest.raises(RuntimeError, match="temporary failure"):
+        asyncio.run(adapter._handle_event_item(_group_item()))
+
+    asyncio.run(adapter._handle_event_item(_group_item()))
+    assert len(attempts) == 2
+    assert adapter._event_queue.qsize() == 1
+    assert adapter.get_stats()["messages_in"] == 1
+
+
 def test_multiple_instances_are_isolated():
     """多账号 = 多个平台实例：客户端/游标/策略/统计互不串线。"""
     a = QWPadAdapter(

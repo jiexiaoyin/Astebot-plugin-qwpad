@@ -487,8 +487,8 @@ class QWPadAdapter(Platform):
             return
         if inbox.message_id in self._dedupe:
             return
-        self._dedupe.add(inbox.message_id)
         if self._skip_before and inbox.timestamp and inbox.timestamp < self._skip_before:
+            self._dedupe.add(inbox.message_id)
             logger.debug(
                 "[QWPad:%s] 首次启动跳过旧消息 id=%s ts=%s",
                 self.instance_id,
@@ -499,6 +499,7 @@ class QWPadAdapter(Platform):
 
         decision = classify(self.policy, inbox)
         if not decision.allowed:
+            self._dedupe.add(inbox.message_id)
             logger.debug(
                 "[QWPad:%s] 策略拒绝 %s: room=%s user=%s",
                 self.instance_id,
@@ -508,7 +509,10 @@ class QWPadAdapter(Platform):
             )
             return
 
+        # 分发成功后才记入去重：分发抛错时不推进游标，下一轮还能重试；
+        # 若提前去重，重试会被当成重复消息直接丢弃。
         await self._dispatch(inbox)
+        self._dedupe.add(inbox.message_id)
 
     async def _dispatch(self, inbox: InboundMessage) -> None:
         refs = ([inbox.media] if inbox.media else []) + list(

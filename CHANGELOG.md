@@ -20,6 +20,8 @@
 - **视频元数据**：`sendVideo` 的 `duration`/`coverImageSize` 优先复制同次上传的
   `durationTime`/`fileThumbSize`，ffprobe 仅作兜底。
 - **引用窗口**：`QUOTE_WINDOW_S` 真正生效，过期锚点不再被引用。
+- **分发重试**：消息改为分发成功后才记入去重；分发抛错时游标不前进，下一轮
+  可正常重试，不再因提前去重而丢消息。
 
 ### 测试
 
