@@ -1,17 +1,21 @@
 import asyncio
+from types import SimpleNamespace
 
 import pytest
 from astrbot.api.event import AstrMessageEvent, MessageChain
-from astrbot.api.message_components import At, Plain, Record, Reply
+from astrbot.api.message_components import At, Location, Plain, Record, Reply
 from astrbot.core.platform.platform import PlatformStatus
+from qwpad_plugin import qwpad_adapter
 from qwpad_plugin.qwpad_adapter import (
     QUOTE_WINDOW_S,
     QWPadAdapter,
     account_online_state,
 )
-from qwpad_plugin.qwpad_client import QWPadAuthError
+from qwpad_plugin.qwpad_client import QWPadApiError, QWPadAuthError, QWPadError
 from qwpad_plugin.qwpad_messages import parse_event
 from qwpad_plugin.qwpad_policy import PolicySnapshot
+from qwpad_plugin.qwpad_send import _record_path, send_chain
+from qwpad_plugin.qwpad_storage import CursorStore
 
 
 def _adapter():
@@ -156,6 +160,42 @@ def test_event_send_records_outbound_count(caplog):
     # 发送成功路径不能触发被吞掉的异常日志（曾因局部 import logger 触发
     # UnboundLocalError，测试仍绿但线上每次发送都报错）。
     assert "发送消息异常" not in caplog.text
+
+
+class _FailClient(FakeClient):
+    async def send_text(self, *a, **k):
+        raise QWPadError("vendor down", retryable=False)
+
+    async def send_hyper_text(self, *a, **k):
+        raise QWPadError("vendor down", retryable=False)
+
+
+def test_event_send_raises_when_all_failed():
+    """全部发送失败必须抛给核心，不能静默当成已回复。"""
+    adapter = _adapter()
+    adapter._client = _FailClient()
+    inbox = parse_event(_dm_item(), self_id="999", self_nick="小助理")
+    event = adapter.create_event(adapter._build_message(inbox, "张三", []))
+    with pytest.raises(RuntimeError, match="发送全部失败"):
+        asyncio.run(event.send(MessageChain([Plain("收到")])))
+    assert adapter.get_stats()["messages_out"] == 0
+
+
+def test_send_by_session_raises_when_all_failed():
+    adapter = _adapter()
+    adapter._client = _FailClient()
+    session = SimpleNamespace(session_id="1001")
+    with pytest.raises(RuntimeError, match="发送全部失败"):
+        asyncio.run(adapter.send_by_session(session, MessageChain([Plain("收到")])))
+    assert adapter.get_stats()["messages_out"] == 0
+
+
+def test_send_by_session_raises_when_not_connected():
+    adapter = _adapter()
+    adapter._client = None
+    session = SimpleNamespace(session_id="1001")
+    with pytest.raises(RuntimeError, match="未连接"):
+        asyncio.run(adapter.send_by_session(session, MessageChain([Plain("收到")])))
 
 
 class _NamedClient(FakeClient):
@@ -462,7 +502,7 @@ def test_fatal_auth_error_propagates_and_marks_error(monkeypatch):
             return None
 
     class Cursor:
-        def __init__(self, directory):
+        def __init__(self, directory, fingerprint=""):
             pass
 
         def load(self):
@@ -484,10 +524,15 @@ def test_fatal_auth_error_propagates_and_marks_error(monkeypatch):
     asyncio.run(run())
     assert adapter.status == PlatformStatus.ERROR
     assert adapter._fatal_error is not None
-    # 占用表/实例表必须清理，便于修复 TOKEN 后重新启用。
+    # TOKEN 占用必须释放，便于修复 TOKEN 后重新启用。
     from qwpad_plugin.qwpad_storage import token_fingerprint
 
     assert token_fingerprint(adapter.token) not in QWPadAdapter._ACTIVE_TOKENS
+    # 实例保留到 terminate：否则 Web API 拿不到 last_error，排障时只看到“未找到实例”。
+    assert adapter.instance_id in QWPadAdapter.instances
+    assert adapter.get_stats()["last_error"] is not None
+
+    asyncio.run(adapter.terminate())
     assert adapter.instance_id not in QWPadAdapter.instances
 
 
@@ -519,3 +564,180 @@ def test_send_streaming_aggregates_without_double_metric(monkeypatch):
         "第一段",
         "第二段",
     ]
+
+
+def test_record_path_resolves_tts_url(monkeypatch, tmp_path):
+    """核心 TTS 的 Record(file=http...) 必须经 convert_to_file_path 落成本地文件。"""
+    wav = tmp_path / "tts.wav"
+    wav.write_bytes(b"RIFF")
+
+    async def fake_convert(self):
+        return str(wav)
+
+    monkeypatch.setattr(Record, "convert_to_file_path", fake_convert)
+    record = Record(file="http://127.0.0.1:6185/api/file/token")
+    assert asyncio.run(_record_path(record)) == str(wav)
+
+
+class FakeVoiceClient(FakeClient):
+    def __init__(self):
+        super().__init__()
+        self.voices = []
+        self.uploads = []
+
+    async def upload_file(self, path, file_type):
+        self.uploads.append((path, file_type))
+        return {"fileId": "voice-1"}
+
+    async def send_voice(self, to_id, upload, voice_time, reply=None):
+        self.voices.append((to_id, upload, voice_time, reply))
+        return {"msgUniqueIdentifier": "voice-sent"}
+
+
+def test_send_chain_sends_record_from_url(monkeypatch, tmp_path):
+    """TTS 语音（URL）出站必须真的发成语音，而不是静默失败。"""
+    from qwpad_plugin import qwpad_send
+
+    wav = tmp_path / "tts.wav"
+    wav.write_bytes(b"RIFF")
+
+    async def fake_convert(self):
+        return str(wav)
+
+    async def fake_encode(path):
+        assert path == str(wav)
+        return b"\x02silk", 2
+
+    monkeypatch.setattr(Record, "convert_to_file_path", fake_convert)
+    monkeypatch.setattr(qwpad_send, "encode_voice_to_silk", fake_encode)
+
+    client = FakeVoiceClient()
+    stats = asyncio.run(send_chain(client, "1001", [Record(file="https://x/y.mp3")]))
+
+    assert stats["success"] is True and stats["sent"] == 1
+    assert client.voices and client.voices[0][2] == 2
+
+
+def test_send_chain_keeps_at_only_message():
+    client = FakeClient()
+    stats = asyncio.run(send_chain(client, "room-1", [At(qq="123")]))
+    assert stats["sent"] == 1
+    assert {"subtype": 1, "text": "123"} in client.texts[0]["content"]
+
+
+def test_send_chain_rolls_back_failed_count_after_dequote_retry():
+    class ReplyFailClient(FakeClient):
+        async def send_hyper_text(self, to_id, content, reply=None):
+            if reply is not None:
+                raise QWPadError("quote failed", retryable=False)
+            return await super().send_hyper_text(to_id, content, reply=reply)
+
+    client = ReplyFailClient()
+    stats = asyncio.run(
+        send_chain(
+            client,
+            "1001",
+            [Plain("收到")],
+            reply_anchor={"msgUniqueIdentifier": "orig-1"},
+        )
+    )
+    assert stats["failed"] == 0
+    assert stats["sent"] == 1
+    assert stats["success"] is True
+
+
+def test_cursor_store_invalidates_on_token_change(tmp_path):
+    first = CursorStore(tmp_path, "fp-a")
+    first.save(42)
+    assert CursorStore(tmp_path, "fp-a").load() == 42
+    # 换了 TOKEN：旧游标属于另一个账号的事件空间，必须重置。
+    assert CursorStore(tmp_path, "fp-b").load() == 0
+
+
+def test_poll_loop_skips_poison_event(monkeypatch):
+    adapter = _adapter()
+    adapter._cursor_store = None
+
+    class PageClient:
+        def __init__(self):
+            self.calls = 0
+
+        async def fetch_events(self, cursor, **kwargs):
+            self.calls += 1
+            if self.calls <= 3:
+                return SimpleNamespace(items=[{"id": 5}], next_id=5)
+            adapter._running = False
+            return SimpleNamespace(items=[], next_id=5)
+
+    async def always_fail(item):
+        raise RuntimeError("bad message")
+
+    async def no_sleep(seconds):
+        return None
+
+    monkeypatch.setattr(adapter, "_handle_event_item", always_fail)
+    monkeypatch.setattr(qwpad_adapter.asyncio, "sleep", no_sleep)
+    adapter._client = PageClient()
+    adapter._running = True
+
+    asyncio.run(adapter._poll_loop())
+    assert adapter._cursor == 5
+    assert adapter._event_failures == {}
+
+
+def test_poll_loop_stops_on_non_retryable_error():
+    adapter = _adapter()
+
+    class BadRequestClient:
+        async def fetch_events(self, cursor, **kwargs):
+            raise QWPadApiError("bad cursor", retryable=False)
+
+    adapter._client = BadRequestClient()
+    adapter._running = True
+    asyncio.run(adapter._poll_loop())
+    assert adapter._running is False
+    assert adapter._fatal_error is not None
+    assert adapter._stop_event.is_set()
+
+
+def test_reply_component_uses_quoted_message_attribution():
+    adapter = _adapter()
+    item = _group_item()
+    item["message"]["structured"]["msgData"]["reply"] = {
+        "msgUniqueIdentifier": "orig-9",
+        "userId": "1002",
+        "showName": "李四",
+        "timeStamp": 1792627000,
+        "msgData": {"content": "<b>上一条</b>"},
+    }
+    inbox = parse_event(item, self_id="999", self_nick="小助理")
+    assert inbox is not None
+    msg = adapter._build_message(inbox, "测试群", [])
+    reply = next(c for c in msg.message if isinstance(c, Reply))
+    assert reply.id == "orig-9"
+    # pydantic 会把纯数字字符串转成 int；语义上仍是被引用消息的发送者。
+    assert str(reply.sender_id) == "1002"
+    assert reply.sender_nickname == "李四"
+    assert reply.message_str == "上一条"
+
+
+def test_nickname_mention_requires_boundary():
+    item = _dm_item()
+    item["message"]["structured"]["msgData"] = {"content": "@小助理2 你好"}
+    assert parse_event(item, self_id="999", self_nick="小助理").mentions_me is False
+
+    item["message"]["structured"]["msgData"] = {"content": "@小助理 你好"}
+    assert parse_event(item, self_id="999", self_nick="小助理").mentions_me is True
+
+
+def test_location_fallback_uses_core_fields():
+    client = FakeClient()
+    asyncio.run(
+        send_chain(
+            client,
+            "1001",
+            [Location(lat=31.2, lon=121.5, title="门店", content="南京路")],
+        )
+    )
+    assert "31.2,121.5" in client.texts[0]["content"]
+    assert "南京路" in client.texts[0]["content"]

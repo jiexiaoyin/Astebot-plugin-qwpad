@@ -1,5 +1,31 @@
 # Changelog
 
+## 0.3.1 — 2026-10-23
+
+在 0.3.0 规范校正基础上的安全与可靠性修复。
+
+### 修复
+
+- **Record 语音/TTS 发不出去**：`_record_path()` 改用
+  `Record.convert_to_file_path()` 统一解析 http(s)/base64/data/file 引用，
+  TTS 生成的 WAV 不再因 URL 分支被当成文件路径而失败。
+- **发送失败静默**：`event.send()` / `send_by_session()` 在全部组件失败时抛
+  `RuntimeError`；未连接时也不再假装发送成功；部分失败记 warning。
+- **非可重试错误**：轮询遇到 `retryable=false` 的 `QWPadError` 时停止轮询并
+  把平台置为 `ERROR`；单条毒消息最多重试 3 次后跳过，避免阻塞整个队列。
+- **游标安全**：`CursorStore` 记录 TOKEN 指纹，TOKEN 变更后自动丢弃旧游标；
+  游标落盘失败不再前移内存游标。
+- **引用归因**：`Reply` 使用被引用消息的发送者/时间，而不是当前发送者。
+- **下载安全**：媒体下载增加 SSRF 校验（私网/回环/重定向逐跳校验），
+  并发与总字节数受限，失败路径清理已下载文件。
+- **插件名合规**：`metadata.name` / `PLUGIN_NAME` 改为
+  `astrbot_plugin_qwpad`（`str.isidentifier()`），部署目录与数据目录同步改名。
+
+### 新增
+
+- 回归测试：Record URL/TTS、失败传播、游标 TOKEN 指纹、毒消息跳过、
+  非可重试错误终止、Reply 归因、昵称边界、Location 兜底等（68 tests）。
+
 ## 0.3.0 — 2026-10-23
 
 对照 AstrBot 4.29.1 插件/平台适配器规范逐项校正，不修改平台名、配置字段与数据格式。
@@ -92,7 +118,7 @@
 - 出站：文本分片、@ 成员 / @所有人、引用回复、图片、语音（SILK）、视频、文件
 - 语音：入站 SILK→WAV；出站 ffmpeg→PCM→SILK，超限自动降码率
 - 策略：用户/群白名单、黑名单、`group_reply` 三种群模式、默认拒绝
-- 状态 Web API：`POST /astrbot-plugin-qwpad/status`（不返回 TOKEN）
+- 状态 Web API：`POST /astrbot_plugin_qwpad/status`（不返回 TOKEN）
 - 流式输出聚合为单条发送（企业微信无消息编辑能力）
 
 ### 修复

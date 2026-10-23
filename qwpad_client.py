@@ -12,13 +12,15 @@ from __future__ import annotations
 
 import asyncio
 import hashlib
+import ipaddress
 import mimetypes
 import os
+import socket
 from collections.abc import AsyncIterator
 from contextlib import asynccontextmanager
 from dataclasses import dataclass, field
 from typing import Any, BinaryIO
-from urllib.parse import urlsplit
+from urllib.parse import urljoin, urlsplit
 
 import httpx
 from astrbot import logger
@@ -799,9 +801,8 @@ class QWPadClient:
         )
         return None
 
-    async def _download_url(
-        self, url: str, max_bytes: int = MAX_DOWNLOAD_BYTES
-    ) -> bytes:
+    async def _validate_download_url(self, url: str) -> None:
+        """下载地址只允许公网 HTTP(S)，防止服务端返回内网地址造成 SSRF。"""
         parts = urlsplit(str(url or ""))
         if parts.scheme not in ("http", "https"):
             raise QWPadApiError(
@@ -810,24 +811,82 @@ class QWPadClient:
                 "会返回 fs:// 对象引用，需部署方启用本地下载出口",
                 retryable=False,
             )
+        host = (parts.hostname or "").strip().lower()
+        if not host:
+            raise QWPadApiError("下载地址缺少主机名", retryable=False)
+        port = parts.port or (443 if parts.scheme == "https" else 80)
+        if self._transport is not None:
+            # 注入了自定义 transport（单测 / MockTransport）时不走真实 DNS。
+            return
+        try:
+            infos = await asyncio.to_thread(
+                socket.getaddrinfo, host, port, 0, socket.SOCK_STREAM
+            )
+        except OSError as exc:
+            raise QWPadApiError(
+                f"下载地址无法解析（{host}）: {exc}", retryable=True
+            ) from exc
+        for info in infos:
+            raw_ip = str(info[4][0]).split("%", 1)[0]
+            try:
+                ip = ipaddress.ip_address(raw_ip)
+            except ValueError:
+                continue
+            if (
+                ip.is_private
+                or ip.is_loopback
+                or ip.is_link_local
+                or ip.is_multicast
+                or ip.is_reserved
+                or ip.is_unspecified
+            ):
+                raise QWPadApiError(
+                    f"下载地址指向内网/本机（{host} → {ip}），已拒绝",
+                    retryable=False,
+                )
+
+    async def _download_url(
+        self, url: str, max_bytes: int = MAX_DOWNLOAD_BYTES
+    ) -> bytes:
         # 独立无鉴权客户端：cloudUrl 属于对象存储，不能收到 Bearer TOKEN。
         http = await self._ensure_download_http()
+        current = str(url or "")
         try:
-            async with http.stream("GET", url) as response:
-                response.raise_for_status()
-                chunks: list[bytes] = []
-                total = 0
-                async for chunk in response.aiter_bytes():
-                    total += len(chunk)
-                    if total > max_bytes:
+            # 手动跟随重定向：每一跳都要重新做内网地址校验。
+            for _ in range(5):
+                await self._validate_download_url(current)
+                async with http.stream(
+                    "GET", current, follow_redirects=False
+                ) as response:
+                    if response.status_code in (301, 302, 303, 307, 308):
+                        location = response.headers.get("location")
+                        if not location:
+                            raise QWPadApiError(
+                                "下载重定向缺少 Location", retryable=False
+                            )
+                        current = urljoin(current, location)
+                        continue
+                    if response.status_code >= 400:
                         raise QWPadApiError(
-                            f"下载超过上限 {max_bytes} 字节", retryable=False
+                            f"下载失败 HTTP {response.status_code} "
+                            f"{current.split('?')[0]}",
+                            status=response.status_code,
+                            retryable=response.status_code >= 500,
                         )
-                    chunks.append(chunk)
-                return b"".join(chunks)
+                    chunks: list[bytes] = []
+                    total = 0
+                    async for chunk in response.aiter_bytes():
+                        total += len(chunk)
+                        if total > max_bytes:
+                            raise QWPadApiError(
+                                f"下载超过上限 {max_bytes} 字节", retryable=False
+                            )
+                        chunks.append(chunk)
+                    return b"".join(chunks)
+            raise QWPadApiError("下载重定向次数过多", retryable=False)
         except httpx.HTTPError as exc:
             raise QWPadError(
-                f"下载失败 {url.split('?')[0]}: {exc}", retryable=True
+                f"下载失败 {current.split('?')[0]}: {exc}", retryable=True
             ) from exc
 
     # ── 群 / 联系人 ─────────────────────────────────────────────────────────

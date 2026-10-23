@@ -1,6 +1,6 @@
 """游标与去重状态：按平台实例落盘，重启不重放旧消息。
 
-状态文件位于 ``data/plugin_data/astrbot-plugin-qwpad/<platform_id>/``，
+状态文件位于 ``data/plugin_data/astrbot_plugin_qwpad/<platform_id>/``，
 不写插件源码目录（插件升级/重装不会丢状态）。
 """
 
@@ -20,7 +20,7 @@ from typing import Any
 from astrbot import logger
 
 DEDUPE_CAPACITY = 2000
-PLUGIN_NAME = "astrbot-plugin-qwpad"
+PLUGIN_NAME = "astrbot_plugin_qwpad"
 
 
 def plugin_data_dir() -> Path:
@@ -51,6 +51,8 @@ def atomic_write_json(path: Path, payload: Any) -> None:
     try:
         with os.fdopen(fd, "w", encoding="utf-8") as fh:
             json.dump(payload, fh, ensure_ascii=False)
+            fh.flush()
+            os.fsync(fh.fileno())
         os.replace(tmp, path)
     except OSError:
         try:
@@ -61,10 +63,15 @@ def atomic_write_json(path: Path, payload: Any) -> None:
 
 
 class CursorStore:
-    """``{lastEventId, updatedAt}`` 的小状态文件，原子写。"""
+    """``{lastEventId, tokenFingerprint, updatedAt}`` 的小状态文件，原子写。
 
-    def __init__(self, directory: Path):
+    游标按平台实例 id 落盘；如果实例换了 TOKEN（不同账号的事件 id 空间
+    不通用），旧游标必须失效，否则会跳过新账号的消息或越界拉取。
+    """
+
+    def __init__(self, directory: Path, fingerprint: str = ""):
         self.path = directory / "cursor.json"
+        self.fingerprint = fingerprint or ""
         self._last = 0
 
     def load(self) -> int:
@@ -79,6 +86,16 @@ class CursorStore:
             self._last = int(raw.get("lastEventId") or 0)
         except (TypeError, ValueError, AttributeError):
             self._last = 0
+        stored = str(raw.get("tokenFingerprint") or "")
+        if self.fingerprint and stored and stored != self.fingerprint:
+            logger.warning(
+                "[QWPad] 平台实例 %s 的 TOKEN 已更换（%s → %s），游标重置",
+                self.path.parent.name,
+                stored,
+                self.fingerprint,
+            )
+            self.reset()
+            return 0
         return self._last
 
     @property
@@ -89,17 +106,20 @@ class CursorStore:
         event_id = int(event_id or 0)
         if event_id <= 0 or event_id == self._last:
             return
-        self._last = event_id
         try:
             atomic_write_json(
                 self.path,
                 {
                     "lastEventId": event_id,
+                    "tokenFingerprint": self.fingerprint,
                     "updatedAt": time.strftime("%Y-%m-%d %H:%M:%S"),
                 },
             )
         except OSError as exc:
+            # 只有写成功才推进内存游标：写失败时下一轮还会重试落盘。
             logger.warning("[QWPad] 写游标失败 %s: %s", self.path, exc)
+            return
+        self._last = event_id
 
     def reset(self) -> None:
         """清空游标（插件页「从头拉取」用）。"""

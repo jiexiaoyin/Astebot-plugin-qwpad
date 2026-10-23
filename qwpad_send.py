@@ -18,6 +18,7 @@ QWPad 每条文本上限约 2000 字符，超长自动分片。
 from __future__ import annotations
 
 import asyncio
+import contextlib
 import math
 import os
 import re
@@ -54,6 +55,9 @@ from .qwpad_media import encode_voice_to_silk, safe_filename
 MAX_MESSAGE_LENGTH = 2000
 # 同一会话的发送串行化，避免两条回复的分片互相穿插。
 _SEND_LOCKS: dict[str, asyncio.Lock] = {}
+# 发送锁按 (client, chat) 累积；会话很多时只清理「当前没人持有」的锁，
+# 避免无限增长（正在用的锁被移除会导致同一会话并发发送）。
+MAX_SEND_LOCKS = 512
 
 _MARKDOWN_RULES = (
     (r"\*\*(.+?)\*\*", r"\1"),  # 粗体
@@ -111,7 +115,38 @@ def _lock_for(client: QWPadClient, chat_id: str) -> asyncio.Lock:
     if lock is None:
         lock = asyncio.Lock()
         _SEND_LOCKS[key] = lock
+        if len(_SEND_LOCKS) > MAX_SEND_LOCKS:
+            for old_key, old_lock in list(_SEND_LOCKS.items()):
+                if old_lock is lock or old_lock.locked():
+                    continue
+                _SEND_LOCKS.pop(old_key, None)
+                if len(_SEND_LOCKS) <= MAX_SEND_LOCKS // 2:
+                    break
     return lock
+
+
+async def _with_retry(call: Any, *, attempts: int = 3) -> Any:
+    """对可重试的 QWPad 错误做有限重试（网络抖动/超时）。
+
+    注意：超时可能发生在服务端已经接收之后，极端情况下会重复发送一条；
+    相比静默丢回复，这里选择「至少一次」。
+    """
+    delay = 0.5
+    for attempt in range(1, attempts + 1):
+        try:
+            return await call()
+        except QWPadError as exc:
+            if not exc.retryable or attempt >= attempts:
+                raise
+            logger.warning(
+                "[QWPad] 发送失败（第 %s/%s 次，%.1fs 后重试）: %s",
+                attempt,
+                attempts,
+                delay,
+                exc,
+            )
+            await asyncio.sleep(delay)
+            delay *= 2
 
 
 def _reply_payload(anchor: dict[str, Any] | None) -> dict[str, Any] | None:
@@ -215,6 +250,10 @@ async def _probe_video(path: str) -> tuple[int, int]:
         duration = math.ceil(float((out or b"").strip() or 0))
         return max(0, duration), 0
     except Exception:  # noqa: BLE001 - 时长只是元数据
+        with contextlib.suppress(Exception):
+            if proc.returncode is None:
+                proc.kill()
+                await proc.wait()
         return 0, 0
 
 
@@ -341,10 +380,17 @@ def _temp_silk_path() -> str:
 
 
 async def _record_path(component: Record) -> str:
-    """Record 的 file/url/path 因平台而异，统一解析成本地路径。"""
+    """Record 的 file/url/path 因平台而异，统一解析成本地路径。
+
+    AstrBot 的 TTS（``use_file_service=true``）会把语音做成
+    ``Record(file="<callback>/api/file/<token>", url=同值)``。这类来源必须走
+    组件的 ``convert_to_file_path()`` 下载/转码，不能只判断本地文件是否存在。
+    """
     for candidate in (component.path, component.file, component.url):
         if not candidate:
             continue
+        if candidate.startswith(("http://", "https://", "base64://", "data:")):
+            break  # 交给 convert_to_file_path()
         if candidate.startswith("file://"):
             from urllib.parse import unquote, urlparse
             from urllib.request import url2pathname
@@ -355,11 +401,13 @@ async def _record_path(component: Record) -> str:
             continue
         if os.path.isfile(candidate):
             return candidate
-    resolver = getattr(component, "_resolve_file_source", None)
-    if resolver is not None:
-        candidate = await resolver()
-        if candidate and os.path.isfile(candidate):
-            return candidate
+    try:
+        converted = await component.convert_to_file_path()
+    except Exception as exc:  # noqa: BLE001 - 来源不可用由调用方降级
+        logger.warning("[QWPad] 语音来源解析失败: %s", exc)
+        return ""
+    if converted and os.path.isfile(converted):
+        return converted
     return ""
 
 
@@ -378,9 +426,13 @@ def _fallback_text(component: Any) -> str:
             p for p in (component.title, component.content, component.url) if p
         )
     if isinstance(component, Location):
+        # 核心 Location 组件的字段是 title/content/lat/lon（没有 address）。
         title = getattr(component, "title", "") or ""
-        address = getattr(component, "address", "") or ""
-        return f"[位置] {title} {address}".strip()
+        content = getattr(component, "content", "") or ""
+        lat = getattr(component, "lat", None)
+        lon = getattr(component, "lon", None)
+        coords = f"{lat},{lon}" if lat is not None and lon is not None else ""
+        return f"[位置] {title} {content} {coords}".strip()
     return ""
 
 
@@ -411,15 +463,33 @@ async def send_chain(
             text = strip_markdown(text) if strip_md else text
             pieces = split_message(text, limit)
             if not pieces:
+                # 只有 @（例如 AtAll）没有正文时也要把提醒发出去，不能静默丢弃。
+                if ats:
+                    try:
+                        receipt = await _with_retry(
+                            lambda: _send_text_piece(
+                                client, chat_id, "", reply=reply_left, ats=ats
+                            )
+                        )
+                        reply_left = None
+                        stats["sent"] += 1
+                        stats["receipt"] = receipt or {}
+                    except QWPadError as exc:
+                        stats["failed"] += 1
+                        stats["errors"].append(f"at: {exc}")
+                        logger.warning("[QWPad] 发送 @ 提醒失败: %s", exc)
                 return
             for index, piece in enumerate(pieces):
                 try:
-                    receipt = await _send_text_piece(
-                        client,
-                        chat_id,
-                        piece,
-                        reply=reply_left if index == 0 else None,
-                        ats=ats if index == 0 else [],
+                    receipt = await _with_retry(
+                        # 立即 await, 不存在循环变量晚绑定问题
+                        lambda: _send_text_piece(
+                            client,
+                            chat_id,
+                            piece,  # noqa: B023
+                            reply=reply_left if index == 0 else None,  # noqa: B023
+                            ats=ats if index == 0 else [],  # noqa: B023
+                        )
                     )
                     reply_left = None
                     stats["sent"] += 1
@@ -439,6 +509,10 @@ async def send_chain(
                                 reply=None,
                                 ats=ats if index == 0 else [],
                             )
+                            # 去引用重试成功：第一条失败已计入 failed，回滚掉。
+                            stats["failed"] = max(0, stats["failed"] - 1)
+                            if stats["errors"]:
+                                stats["errors"].pop()
                             stats["sent"] += 1
                             stats["receipt"] = receipt or {}
                         except QWPadError as retry_exc:
@@ -461,8 +535,11 @@ async def send_chain(
             await flush_text()
             if isinstance(component, (Image, Record, Video, File)):
                 try:
-                    await _send_media_component(
-                        client, chat_id, component, reply=reply_left
+                    await _with_retry(
+                        # 立即 await, 不存在循环变量晚绑定问题
+                        lambda: _send_media_component(
+                            client, chat_id, component, reply=reply_left  # noqa: B023
+                        )
                     )
                     reply_left = None
                     stats["sent"] += 1

@@ -350,7 +350,12 @@ def _is_mentioned(
                 return True
             if self_nick and _s(entry.get("nickname")) == self_nick:
                 return True
-    return bool(self_nick and f"@{self_nick}" in (text or ""))
+    if not self_nick:
+        return False
+    # 子串匹配会把「@小助理2」也当成 @ 小助理；昵称后不能紧跟 ASCII 字母/数字。
+    return bool(
+        re.search(rf"@{re.escape(self_nick)}(?![A-Za-z0-9_])", text or "")
+    )
 
 
 # 人工在企微客户端「引用」一条消息时，pad 服务端会把引用压平成纯文本（实测 2026-10-22）：
@@ -750,7 +755,9 @@ def reply_context(inbox: InboundMessage) -> str | None:
         return None
     body = _as_dict(reply.get("msgData"))
     text = _first_str(body, "content", "text")
-    return text or None
+    if not text:
+        return None
+    return strip_html(text).strip() or None
 
 
 __all__ = [

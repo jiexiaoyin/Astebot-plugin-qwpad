@@ -1,6 +1,6 @@
 # 部署与验证
 
-本文面向运维/部署人员，说明如何把 `astrbot-plugin-qwpad` 装进 AstrBot、配置平台
+本文面向运维/部署人员，说明如何把 `astrbot_plugin_qwpad` 装进 AstrBot、配置平台
 实例、验证收发，以及从 0.1.x 迁移到 0.2.x、0.2.x 升级到 0.3.0。
 
 - 插件版本：`0.3.0`
@@ -69,15 +69,15 @@ https://github.com/jiexiaoyin/Astebot-plugin-qwpad
 rsync -a --delete \
   --exclude='.git' --exclude='tests' --exclude='__pycache__' \
   --exclude='.pytest_cache' \
-  /path/to/astrbot-plugin-qwpad/ \
-  "$ASTRBOT_DATA/plugins/astrbot-plugin-qwpad/"
+  /path/to/astrbot_plugin_qwpad/ \
+  "$ASTRBOT_DATA/plugins/astrbot_plugin_qwpad/"
 
 docker restart astrbot
 ```
 
-插件目录名保持 `astrbot-plugin-qwpad`。
+插件目录名保持 `astrbot_plugin_qwpad`。
 
-> 升级时不要删除 `$ASTRBOT_DATA/plugin_data/astrbot-plugin-qwpad/`，否则游标和
+> 升级时不要删除 `$ASTRBOT_DATA/plugin_data/astrbot_plugin_qwpad/`，否则游标和
 > 运行状态会丢失。
 
 ---
@@ -180,8 +180,8 @@ docker logs --since 3m astrbot 2>&1 | grep -iE 'qwpad|wecom\(Pad\)|platform'
 期望看到：
 
 ```text
-Loading plugin astrbot-plugin-qwpad ...
-Plugin astrbot-plugin-qwpad (0.3.0) ...
+Loading plugin astrbot_plugin_qwpad ...
+Plugin astrbot_plugin_qwpad (0.3.0) ...
 Loading IM platform adapter wecom(Pad)(wecom(Pad)) ...
 [QWPad:wecom(Pad)] 已连接 <昵称>（<企业> / <userId>），游标 <n>，策略 ...
 ```
@@ -201,7 +201,7 @@ Loading IM platform adapter wecom(Pad)(wecom(Pad)) ...
 ### 5.1 状态接口
 
 ```bash
-curl -s -X POST http://127.0.0.1:6185/api/plug/astrbot-plugin-qwpad/status \
+curl -s -X POST http://127.0.0.1:6185/api/plug/astrbot_plugin_qwpad/status \
   -H "Authorization: Bearer $ASTRBOT_DASHBOARD_TOKEN" \
   -H 'Content-Type: application/json' \
   -d '{"platform_id": "wecom(Pad)"}'
@@ -270,7 +270,7 @@ curl -s -X POST http://127.0.0.1:6185/api/plug/astrbot-plugin-qwpad/status \
 要点：
 
 - 每个实例 `id` 唯一；
-- 每个实例独立游标目录 `plugin_data/astrbot-plugin-qwpad/<安全化 id>/`；
+- 每个实例独立游标目录 `plugin_data/astrbot_plugin_qwpad/<安全化 id>/`；
 - 同一 TOKEN 不能配到两个实例，否则后启动者报
   `同一 TOKEN 已被平台实例 ... 使用`；
 - 不支持同一账号多实例负载均衡/主备。
@@ -293,7 +293,7 @@ cp "$ASTRBOT_DATA/cmd_config.json" \
    "/data/astrbot-cmd_config-$(date +%Y%m%d-%H%M%S).json"
 cp "$ASTRBOT_DATA/data_v4.db" \
    "/data/astrbot-data_v4-$(date +%Y%m%d-%H%M%S).db"
-cp -a "$ASTRBOT_DATA/plugin_data/astrbot-plugin-qwpad" \
+cp -a "$ASTRBOT_DATA/plugin_data/astrbot_plugin_qwpad" \
    "/data/astrbot-qwpad-plugin-data-$(date +%Y%m%d-%H%M%S)"
 ```
 
@@ -352,7 +352,7 @@ wecom(Pad)   → wecom_Pad
 改了 `id` 后，把旧目录里的 `cursor.json` 移到新目录，或接受重新拉取：
 
 ```bash
-cd "$ASTRBOT_DATA/plugin_data/astrbot-plugin-qwpad"
+cd "$ASTRBOT_DATA/plugin_data/astrbot_plugin_qwpad"
 mkdir -p wecom_Pad
 [ -f qwpad/cursor.json ] && mv qwpad/cursor.json wecom_Pad/cursor.json
 ```
@@ -366,8 +366,8 @@ mkdir -p wecom_Pad
 rsync -a --delete \
   --exclude='.git' --exclude='tests' --exclude='__pycache__' \
   --exclude='.pytest_cache' \
-  /path/to/astrbot-plugin-qwpad/ \
-  "$ASTRBOT_DATA/plugins/astrbot-plugin-qwpad/"
+  /path/to/astrbot_plugin_qwpad/ \
+  "$ASTRBOT_DATA/plugins/astrbot_plugin_qwpad/"
 
 docker start astrbot
 docker logs --since 3m astrbot 2>&1 | grep -iE 'qwpad|wecom\(Pad\)'
@@ -376,7 +376,7 @@ docker logs --since 3m astrbot 2>&1 | grep -iE 'qwpad|wecom\(Pad\)'
 确认：
 
 ```text
-Plugin astrbot-plugin-qwpad (0.3.0) ...
+Plugin astrbot_plugin_qwpad (0.3.0) ...
 Loading IM platform adapter wecom(Pad)(wecom(Pad)) ...
 [QWPad:wecom(Pad)] 已连接 ...
 ```
@@ -389,7 +389,7 @@ Loading IM platform adapter wecom(Pad)(wecom(Pad)) ...
 rsync -a --delete \
   --exclude='.git' --exclude='tests' --exclude='__pycache__' \
   --exclude='.pytest_cache' \
-  ./ "$ASTRBOT_DATA/plugins/astrbot-plugin-qwpad/"
+  ./ "$ASTRBOT_DATA/plugins/astrbot_plugin_qwpad/"
 docker restart astrbot
 docker logs --since 3m astrbot 2>&1 | grep -iE 'qwpad|wecom\(Pad\)'
 ```
@@ -404,7 +404,7 @@ docker logs --since 3m astrbot 2>&1 | grep -iE 'qwpad|wecom\(Pad\)'
 
 1. 停 AstrBot；
 2. 恢复旧插件目录；
-3. 恢复 `cmd_config.json`、数据库和 `plugin_data/astrbot-plugin-qwpad/` 备份；
+3. 恢复 `cmd_config.json`、数据库和 `plugin_data/astrbot_plugin_qwpad/` 备份；
 4. 启动，确认旧版本日志正常。
 
 ```bash

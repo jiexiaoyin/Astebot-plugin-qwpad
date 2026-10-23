@@ -1,4 +1,4 @@
-"""astrbot-plugin-qwpad 插件入口。
+"""astrbot_plugin_qwpad 插件入口。
 
 官方平台适配器插件范式（docs/zh/dev/plugin-platform-adapter.md）：
   - main.py 必须有 Star 类；
@@ -17,7 +17,7 @@ from astrbot.api.web import error_response, json_response, request
 from . import qwpad_adapter  # noqa: F401
 from .qwpad_adapter import QWPadAdapter
 
-PLUGIN_NAME = "astrbot-plugin-qwpad"
+PLUGIN_NAME = "astrbot_plugin_qwpad"
 
 
 class QwpadPlugin(Star):

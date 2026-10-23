@@ -1,6 +1,6 @@
-name: astrbot-plugin-qwpad
+name: astrbot_plugin_qwpad
 desc: QWPad 企业微信 pad 协议平台适配器 for AstrBot（一个 TOKEN 对应一个企业微信账号）
-version: 0.3.0
+version: 0.3.1
 author: knowhub-ops
 astrbot_version: ">=4.16.0,<5"
 repo: https://github.com/jiexiaoyin/Astebot-plugin-qwpad

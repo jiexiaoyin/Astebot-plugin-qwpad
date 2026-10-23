@@ -14,6 +14,7 @@ from __future__ import annotations
 
 import asyncio
 import contextlib
+import os
 import time
 from typing import Any, ClassVar
 
@@ -55,6 +56,13 @@ NAME_CACHE_TTL_S = 900.0
 # 自动引用窗口：入站消息后这么久内的首条发送引用它；超时视为普通通知，不引用。
 QUOTE_WINDOW_S = 600.0
 MAX_FORWARD_REFS = 10
+# 同一条事件连续失败这么多次后跳过，避免一条毒消息永久卡住游标。
+MAX_EVENT_ATTEMPTS = 3
+# 单条消息的媒体并发下载数 / 总大小预算（转发消息可能带 10 个附件）。
+MEDIA_DOWNLOAD_CONCURRENCY = 3
+MAX_EVENT_MEDIA_BYTES = 100 * 1024 * 1024
+# 群名/昵称缓存上限，超出时先清理过期项。
+MAX_NAME_CACHE = 500
 # 语音转文字最多等这么久；超时保留语音附件，不阻塞消息。
 VOICE_ASR_TIMEOUT_S = 20.0
 # openapi：/user/getLoginStatus 的 userOnlineStatus=2 才表示当前 PAD 会话在线；
@@ -243,13 +251,16 @@ class QWPadAdapter(Platform):
         self._skip_before = 0.0
         self._room_cache: dict[str, tuple[str, float]] = {}
         self._contact_cache: dict[str, tuple[str, float]] = {}
-        self._replies: dict[str, dict[str, Any]] = {}
         self._pending_reply: dict[str, tuple[float, dict[str, Any]]] = {}
+        # 事件 id → 连续失败次数（毒消息跳过用）；游标推进后清理。
+        self._event_failures: dict[int, int] = {}
         # 注意：不要覆盖 Platform._started_at（父类语义是 datetime），
         # 平台状态置 RUNNING 时由父类 setter 自动写入。
         self._last_event_at = 0.0
         self._messages_in = 0
         self._messages_out = 0
+        # 先登记：即使 run() 启动失败，Web API 仍能看到这个实例和 last_error。
+        self.instances[self.instance_id] = self
 
     # ── AstrBot 契约 ───────────────────────────────────────────────────────
     def meta(self) -> PlatformMetadata:
@@ -286,7 +297,11 @@ class QWPadAdapter(Platform):
         stats = super().get_stats()
         stats.update(
             {
-                "connected": self._running,
+                "connected": bool(
+                    self._running
+                    and self._poll_task is not None
+                    and not self._poll_task.done()
+                ),
                 "account": {
                     "user_id": self._self_id,
                     "nickname": self._self_nick,
@@ -353,7 +368,9 @@ class QWPadAdapter(Platform):
                     self.instance_id,
                 )
 
-            self._cursor_store = CursorStore(instance_dir(self.instance_id))
+            self._cursor_store = CursorStore(
+                instance_dir(self.instance_id), token_fingerprint(self.token)
+            )
             # 游标文件很小，但仍在工作线程读取，避免启动时阻塞事件循环。
             self._cursor = await asyncio.to_thread(self._cursor_store.load)
             if self._cursor == 0 and self.startup_backlog_minutes > 0:
@@ -397,7 +414,8 @@ class QWPadAdapter(Platform):
         finally:
             await self._cleanup()
             self._ACTIVE_TOKENS.pop(fingerprint, None)
-            self.instances.pop(self.instance_id, None)
+            # 保留 instances 登记：启动失败时 Web API 还能通过 last_error
+            # 告诉运维具体原因；terminate() 时才真正移除。
 
     async def terminate(self) -> None:
         self._running = False
@@ -408,6 +426,7 @@ class QWPadAdapter(Platform):
             task.cancel()
             with contextlib.suppress(asyncio.CancelledError, Exception):
                 await task
+        self.instances.pop(self.instance_id, None)
 
     async def _cleanup(self) -> None:
         self._running = False
@@ -435,14 +454,36 @@ class QWPadAdapter(Platform):
                     wait_seconds=self.poll_wait_seconds,
                 )
                 for item in page.items:
-                    await self._handle_event_item(item)
                     event_id = as_int(item.get("id"), 0)
+                    try:
+                        await self._handle_event_item(item)
+                    except asyncio.CancelledError:
+                        raise
+                    except Exception as exc:  # 单条坏消息不能毒死轮询
+                        attempts = self._event_failures.get(event_id, 0) + 1
+                        self._event_failures[event_id] = attempts
+                        if attempts < MAX_EVENT_ATTEMPTS:
+                            # 让外层退避后从同一游标重试这条消息。
+                            raise
+                        logger.error(
+                            "[QWPad:%s] 事件 %s 连续失败 %s 次，跳过: %s",
+                            self.instance_id,
+                            event_id,
+                            attempts,
+                            exc,
+                            exc_info=True,
+                        )
+                        self._event_failures.pop(event_id, None)
+                    else:
+                        self._event_failures.pop(event_id, None)
                     if event_id > self._cursor:
                         self._cursor = event_id
                         if self._cursor_store is not None:
                             await asyncio.to_thread(
                                 self._cursor_store.save, self._cursor
                             )
+                if len(self._event_failures) > 1000:
+                    self._event_failures.clear()
                 if page.next_id > self._cursor:
                     self._cursor = page.next_id
                     if self._cursor_store is not None:
@@ -464,8 +505,19 @@ class QWPadAdapter(Platform):
                 self._stop_event.set()
                 return
             except QWPadError as exc:
-                level = logger.warning if exc.retryable else logger.error
-                level(
+                if not exc.retryable:
+                    # 4xx/参数错误重试不会变好（例如游标非法、配置错误），
+                    # 直接进入 ERROR，让管理端看到 last_error。
+                    self._running = False
+                    self._fatal_error = exc
+                    logger.error(
+                        "[QWPad:%s] 不可重试的轮询错误，停止: %s",
+                        self.instance_id,
+                        exc,
+                    )
+                    self._stop_event.set()
+                    return
+                logger.warning(
                     "[QWPad:%s] 拉取事件失败，%.0fs 后重试: %s",
                     self.instance_id,
                     backoff,
@@ -548,68 +600,103 @@ class QWPadAdapter(Platform):
         )
         downloaded: list[tuple[Any, str, str]] = []
         client = self._client
-        if client is not None and refs:
-            tasks = [
-                cache_media(client, ref)
-                for ref in refs
-                if ref is not None and ref.downloadable
-            ]
-            results = await asyncio.gather(*tasks, return_exceptions=True)
-            index = 0
-            for ref in refs:
-                if ref is None or not ref.downloadable:
-                    continue
-                result = results[index]
-                index += 1
-                if isinstance(result, BaseException):
+        try:
+            if client is not None and refs:
+                # 转发消息一次可能带 10 个附件；并发下载要有上限，
+                # 否则一条消息就会打满连接/内存。
+                semaphore = asyncio.Semaphore(MEDIA_DOWNLOAD_CONCURRENCY)
+
+                async def _download(ref: Any) -> Any:
+                    async with semaphore:
+                        return await cache_media(client, ref)
+
+                tasks = [
+                    _download(ref)
+                    for ref in refs
+                    if ref is not None and ref.downloadable
+                ]
+                results = await asyncio.gather(*tasks, return_exceptions=True)
+                index = 0
+                for ref in refs:
+                    if ref is None or not ref.downloadable:
+                        continue
+                    result = results[index]
+                    index += 1
+                    if isinstance(result, BaseException):
+                        logger.warning(
+                            "[QWPad:%s] 下载媒体异常: %s", self.instance_id, result
+                        )
+                        continue
+                    if result:
+                        path, kind = result
+                        downloaded.append((ref, path, kind))
+
+            # 单条消息的媒体总量预算：超出后丢弃后面的附件（先到先得）。
+            kept: list[tuple[Any, str, str]] = []
+            total_bytes = 0
+            for entry in downloaded:
+                try:
+                    size = os.path.getsize(entry[1])
+                except OSError:
+                    size = 0
+                if total_bytes + size > MAX_EVENT_MEDIA_BYTES:
                     logger.warning(
-                        "[QWPad:%s] 下载媒体异常: %s", self.instance_id, result
+                        "[QWPad:%s] 单条消息媒体超过 %s 字节，丢弃附件 %s",
+                        self.instance_id,
+                        MAX_EVENT_MEDIA_BYTES,
+                        entry[1],
                     )
+                    await _unlink_quietly(entry[1])
                     continue
-                if result:
-                    path, kind = result
-                    downloaded.append((ref, path, kind))
+                total_bytes += size
+                kept.append(entry)
+            downloaded = kept
 
-        if self.voice_to_text and inbox.media and inbox.media.kind == "voice":
-            transcript = await self._transcribe_voice(inbox)
-            if transcript:
-                base = (inbox.text or "").strip()
-                inbox.text = (
-                    transcript
-                    if not base or base == inbox.placeholder
-                    else f"{base}\n{transcript}"
-                )
-                # 已有转写文本时不再把 WAV 交给模型：部分模型会尝试读取二进制、
-                # 执行 shell 去“解析音频”，反而忽略正文。语音文件直接清理。
-                kept = []
-                for entry in downloaded:
-                    if entry[2] == "voice":
-                        await _unlink_quietly(entry[1])
-                    else:
-                        kept.append(entry)
-                downloaded = kept
+            if self.voice_to_text and inbox.media and inbox.media.kind == "voice":
+                transcript = await self._transcribe_voice(inbox)
+                if transcript:
+                    base = (inbox.text or "").strip()
+                    inbox.text = (
+                        transcript
+                        if not base or base == inbox.placeholder
+                        else f"{base}\n{transcript}"
+                    )
+                    # 已有转写文本时不再把 WAV 交给模型：部分模型会尝试读取二进制、
+                    # 执行 shell 去“解析音频”，反而忽略正文。语音文件直接清理。
+                    kept = []
+                    for entry in downloaded:
+                        if entry[2] == "voice":
+                            await _unlink_quietly(entry[1])
+                        else:
+                            kept.append(entry)
+                    downloaded = kept
 
-        chat_name = await self._chat_name(inbox)
-        message = self._build_message(inbox, chat_name, downloaded)
-        if self.quote_replies:
-            self._remember_reply_anchor(inbox)
+            chat_name = await self._chat_name(inbox)
+            message = self._build_message(inbox, chat_name, downloaded)
+            if self.quote_replies:
+                self._remember_reply_anchor(inbox)
 
-        event = self.create_event(message)
-        for _, path, _ in downloaded:
-            event.track_temporary_local_file(path)
-        self._messages_in += 1
-        self._last_event_at = time.time()
-        logger.info(
-            "[QWPad:%s] 收到%s消息 room=%s user=%s type=%s len=%s media=%s",
-            self.instance_id,
-            "群" if inbox.chat_type == "group" else "私",
-            inbox.chat_id,
-            inbox.user_name or inbox.user_id,
-            inbox.msg_name,
-            len(inbox.text or ""),
-            len(downloaded),
-        )
-        self.commit_event(event)
+            event = self.create_event(message)
+            for _, path, _ in downloaded:
+                event.track_temporary_local_file(path)
+            self._messages_in += 1
+            self._last_event_at = time.time()
+            logger.info(
+                "[QWPad:%s] 收到%s消息 room=%s user=%s type=%s len=%s media=%s",
+                self.instance_id,
+                "群" if inbox.chat_type == "group" else "私",
+                inbox.chat_id,
+                inbox.user_name or inbox.user_id,
+                inbox.msg_name,
+                len(inbox.text or ""),
+                len(downloaded),
+            )
+            self.commit_event(event)
+        except BaseException:
+            # 分发失败（包括取消）时事件不会进入队列，临时文件没人清理。
+            for _, path, _ in downloaded:
+                await _unlink_quietly(path)
+            raise
 
     async def _transcribe_voice(self, inbox: InboundMessage) -> str:
         """调用 QWPad 语音转文字；失败只记日志，保留语音附件。"""
@@ -669,13 +756,21 @@ class QWPadAdapter(Platform):
             chain.append(At(qq=self._self_id, name=self._self_nick or ""))
         quoted = reply_context(inbox)
         if quoted:
+            # 引用的是「被引用的那条消息」，不是当前发送者；把当前消息的
+            # id/sender 填进 Reply 会误导模型和唤醒判断（Reply.sender_id
+            # 会被核心用来判断“是否在回复机器人”）。
+            reply_data = inbox.reply if isinstance(inbox.reply, dict) else {}
             chain.append(
                 Reply(
-                    id=inbox.message_id,
-                    sender_id=inbox.user_id,
-                    sender_nickname=inbox.user_name,
+                    id=str(
+                        reply_data.get("msgUniqueIdentifier")
+                        or reply_data.get("messageId")
+                        or ""
+                    ),
+                    sender_id=str(reply_data.get("userId") or ""),
+                    sender_nickname=str(reply_data.get("showName") or ""),
                     message_str=quoted,
-                    time=inbox.timestamp,
+                    time=as_int(reply_data.get("timeStamp"), 0),
                 )
             )
 
@@ -721,9 +816,6 @@ class QWPadAdapter(Platform):
             else {"content": inbox.text or ""},
             "text": original_text,
         }
-        while len(self._replies) > 500:
-            self._replies.pop(next(iter(self._replies)), None)
-        self._replies[inbox.message_id] = anchor
         self._pending_reply[inbox.chat_id] = (time.monotonic(), anchor)
         while len(self._pending_reply) > 200:
             self._pending_reply.pop(next(iter(self._pending_reply)), None)
@@ -732,6 +824,26 @@ class QWPadAdapter(Platform):
     def _anchor_is_quotable(anchor: dict[str, Any]) -> bool:
         # 非文本原消息的引用渲染尚未验证；先退化成普通发送，避免异常气泡。
         return bool(anchor.get("msgUniqueIdentifier")) and anchor.get("type") in (0, 2)
+
+    def _prune_name_caches(self) -> None:
+        """群名/昵称缓存有界：先清过期项，仍超限时淘汰最旧条目。"""
+        if len(self._room_cache) + len(self._contact_cache) <= MAX_NAME_CACHE:
+            return
+        now = time.monotonic()
+        for cache in (self._room_cache, self._contact_cache):
+            for key, (_, cached_at) in list(cache.items()):
+                if now - cached_at >= NAME_CACHE_TTL_S:
+                    cache.pop(key, None)
+        while len(self._room_cache) + len(self._contact_cache) > MAX_NAME_CACHE:
+            cache = (
+                self._room_cache
+                if len(self._room_cache) >= len(self._contact_cache)
+                else self._contact_cache
+            )
+            if not cache:
+                break
+            oldest = min(cache.items(), key=lambda item: item[1][1])[0]
+            cache.pop(oldest, None)
 
     async def _chat_name(self, inbox: InboundMessage) -> str:
         if inbox.chat_type != "group":
@@ -753,6 +865,7 @@ class QWPadAdapter(Platform):
                                 name,
                                 time.monotonic(),
                             )
+                            self._prune_name_caches()
                             return name
                 except Exception:  # noqa: BLE001 - 昵称只是装饰
                     logger.debug(
@@ -780,6 +893,7 @@ class QWPadAdapter(Platform):
             or inbox.chat_id
         )
         self._room_cache[inbox.chat_id] = (name, time.monotonic())
+        self._prune_name_caches()
         return name
 
     # ── 发消息 ──────────────────────────────────────────────────────────────
@@ -794,7 +908,7 @@ class QWPadAdapter(Platform):
                 session.session_id,
             )
             await super().send_by_session(session, message_chain)
-            return
+            raise RuntimeError("QWPad 未连接，消息未发送")
         try:
             stats = await send_chain(
                 client,
@@ -803,12 +917,19 @@ class QWPadAdapter(Platform):
                 limit=self.max_message_length,
                 strip_md=self.strip_markdown,
             )
-            if stats.get("sent"):
-                self._messages_out += int(stats["sent"])
-            if stats.get("failed"):
+            sent = int(stats.get("sent") or 0)
+            failed = int(stats.get("failed") or 0)
+            if sent:
+                self._messages_out += sent
+            if failed and not sent:
+                detail = "; ".join(str(e) for e in stats.get("errors", [])[:3])
+                raise RuntimeError(f"QWPad 发送全部失败: {detail or 'unknown error'}")
+            if failed:
                 logger.warning(
-                    "[QWPad:%s] send_by_session 部分失败: %s",
+                    "[QWPad:%s] send_by_session 部分失败 (sent=%s, failed=%s): %s",
                     self.instance_id,
+                    sent,
+                    failed,
                     stats.get("errors"),
                 )
         finally:
@@ -832,6 +953,7 @@ class QWPadAdapter(Platform):
         if detail.get("roomName") or detail.get("name"):
             name = str(detail.get("roomName") or detail.get("name"))
             self._room_cache[chat_id] = (name, time.monotonic())
+            self._prune_name_caches()
             return {
                 "name": name,
                 "type": "group",
@@ -849,6 +971,7 @@ class QWPadAdapter(Platform):
                 name = _contact_display_name(entry)
                 if name:
                     self._contact_cache[chat_id] = (name, time.monotonic())
+                    self._prune_name_caches()
                     return {"name": name, "type": "dm", "chat_id": chat_id}
         return {"name": chat_id, "type": "dm", "chat_id": chat_id}
 

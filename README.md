@@ -1,4 +1,4 @@
-# astrbot-plugin-qwpad
+# astrbot_plugin_qwpad
 
 [AstrBot](https://github.com/AstrBotDevs/AstrBot) 的企业微信 **pad 协议**平台适配器。
 它通过 [QWPad](https://api.qwpad.com) 的 OpenAPI 长轮询收发消息，让 AstrBot 直接以
@@ -183,21 +183,21 @@ https://github.com/jiexiaoyin/Astebot-plugin-qwpad
 rsync -a --delete \
   --exclude='.git' --exclude='tests' --exclude='__pycache__' \
   --exclude='.pytest_cache' \
-  ./ "$ASTRBOT_DATA/plugins/astrbot-plugin-qwpad/"
+  ./ "$ASTRBOT_DATA/plugins/astrbot_plugin_qwpad/"
 
 docker restart astrbot   # 或重启你的 AstrBot 进程
 ```
 
-插件目录名保持 `astrbot-plugin-qwpad`。升级时不要删除
-`$ASTRBOT_DATA/plugin_data/astrbot-plugin-qwpad/`，否则游标和运行状态会丢失。
+插件目录名保持 `astrbot_plugin_qwpad`。升级时不要删除
+`$ASTRBOT_DATA/plugin_data/astrbot_plugin_qwpad/`，否则游标和运行状态会丢失。
 
 ### 5.3 确认注册成功
 
 启动日志应出现：
 
 ```text
-Loading plugin astrbot-plugin-qwpad ...
-Plugin astrbot-plugin-qwpad (0.3.0) ...
+Loading plugin astrbot_plugin_qwpad ...
+Plugin astrbot_plugin_qwpad (0.3.0) ...
 Loading IM platform adapter wecom(Pad)(wecom(Pad)) ...
 ```
 
@@ -424,7 +424,7 @@ AstrBot Dashboard → 平台配置 → `wecom(Pad)` 实例。
 - 轮询协程、游标、去重；
 - 白名单/群策略、引用开关；
 - 收发统计和状态接口记录；
-- 运行时目录 `plugin_data/astrbot-plugin-qwpad/<安全化 id>/`。
+- 运行时目录 `plugin_data/astrbot_plugin_qwpad/<安全化 id>/`。
 
 注意事项：
 
@@ -438,13 +438,13 @@ AstrBot Dashboard → 平台配置 → `wecom(Pad)` 实例。
 插件注册了 Web API（需要 Dashboard 登录态）：
 
 ```text
-POST /api/plug/astrbot-plugin-qwpad/status
+POST /api/plug/astrbot_plugin_qwpad/status
 ```
 
 请求体可选 `{"platform_id": "wecom(Pad)"}`，不传则返回所有实例。
 
 ```bash
-curl -s -X POST http://127.0.0.1:6185/api/plug/astrbot-plugin-qwpad/status \
+curl -s -X POST http://127.0.0.1:6185/api/plug/astrbot_plugin_qwpad/status \
   -H "Authorization: Bearer $ASTRBOT_DASHBOARD_TOKEN" \
   -H 'Content-Type: application/json' \
   -d '{}'
@@ -507,7 +507,7 @@ curl -s -X POST http://127.0.0.1:6185/api/plug/astrbot-plugin-qwpad/status \
 插件状态写在 AstrBot 的插件数据目录，不写源码目录：
 
 ```text
-<ASTRBOT_DATA>/plugin_data/astrbot-plugin-qwpad/
+<ASTRBOT_DATA>/plugin_data/astrbot_plugin_qwpad/
 └── <safe_instance_id>/
     └── cursor.json        # {"lastEventId": 12345, "updatedAt": "..."}
 ```
@@ -522,7 +522,7 @@ wecom(Pad)-shop2  → wecom_Pad_-shop2
 
 维护建议：
 
-- 升级/重装插件前备份整个 `plugin_data/astrbot-plugin-qwpad/`；
+- 升级/重装插件前备份整个 `plugin_data/astrbot_plugin_qwpad/`；
 - 不要在两个运行中的实例之间手工复制 `cursor.json`；
 - 需要重新拉取积压消息时，先停用平台实例，删除对应 `cursor.json`，再启动；
   此时会重新应用 `startup_backlog_minutes`；
@@ -533,7 +533,7 @@ wecom(Pad)-shop2  → wecom_Pad_-shop2
 ### 13.1 关键日志
 
 ```text
-Loading plugin astrbot-plugin-qwpad ...
+Loading plugin astrbot_plugin_qwpad ...
 [QWPad:wecom(Pad)] 已连接 <昵称>（<企业> / <userId>），游标 <n>，策略 ...
 [QWPad:wecom(Pad)] 收到私消息 room=... user=... type=... len=... media=...
 [QWPad:wecom(Pad)] 收到群消息 room=... user=... type=... len=... media=...
@@ -630,7 +630,7 @@ qwpad_client ──► qwpad_messages（解析/过滤）
 
 ### 15.1 常规升级
 
-1. 备份 `cmd_config.json`、数据库和 `plugin_data/astrbot-plugin-qwpad/`；
+1. 备份 `cmd_config.json`、数据库和 `plugin_data/astrbot_plugin_qwpad/`；
 2. 替换插件目录或从仓库更新；
 3. 重启 AstrBot；
 4. 确认日志版本号、`wecom(Pad)` 注册、账号在线。
@@ -706,9 +706,9 @@ qwpad_client ──► qwpad_messages（解析/过滤）
 测试需要 AstrBot 运行环境（依赖 `astrbot` 包）。推荐在 AstrBot 容器内跑：
 
 ```bash
-# 把插件放到容器可访问的位置，目录名保持 astrbot-plugin-qwpad
+# 把插件放到容器可访问的位置，目录名保持 astrbot_plugin_qwpad
 docker exec -w /AstrBot/data/plugins astrbot \
-  python -m pytest -q astrbot-plugin-qwpad/tests
+  python -m pytest -q astrbot_plugin_qwpad/tests
 ```
 
 本地已安装 AstrBot 依赖时也可以：

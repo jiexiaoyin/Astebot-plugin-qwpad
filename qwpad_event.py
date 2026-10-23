@@ -40,6 +40,7 @@ class QWPadMessageEvent(AstrMessageEvent):
         self._reply_anchor = reply_anchor
 
     async def send(self, message: MessageChain) -> None:
+        stats: dict[str, Any] | None = None
         try:
             if self._client is not None:
                 adapter = self._adapter
@@ -61,12 +62,22 @@ class QWPadMessageEvent(AstrMessageEvent):
                         stats["sent"],
                         self.chat_id,
                     )
-                if stats.get("failed"):
-                    self.set_extra("_qwpad_last_send_errors", stats.get("errors"))
-        except Exception:  # noqa: BLE001 - 发送失败不能吞掉事件流程，但要留痕
-            logger.exception("[QWPad] 发送消息异常")
         finally:
             await super().send(message)
+        if not stats:
+            return
+        if stats.get("failed") and not stats.get("sent"):
+            self.set_extra("_qwpad_last_send_errors", stats.get("errors"))
+            detail = "; ".join(str(e) for e in stats.get("errors", [])[:3])
+            # 全部失败必须让核心感知，否则会被当成“已回复”
+            raise RuntimeError(f"QWPad 发送全部失败: {detail or 'unknown error'}")
+        if stats.get("failed"):
+            self.set_extra("_qwpad_last_send_errors", stats.get("errors"))
+            logger.warning(
+                "[QWPad:%s] 部分消息发送失败: %s",
+                getattr(self._adapter, "instance_id", "-"),
+                stats.get("errors"),
+            )
 
     async def send_streaming(
         self,

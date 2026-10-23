@@ -7,6 +7,7 @@
 from __future__ import annotations
 
 import asyncio
+import contextlib
 import math
 import os
 import re
@@ -202,7 +203,19 @@ async def encode_voice_to_silk(audio_path: str) -> tuple[bytes, int] | None:
             stdout=asyncio.subprocess.DEVNULL,
             stderr=asyncio.subprocess.PIPE,
         )
-        _, err = await asyncio.wait_for(proc.communicate(), timeout=FFMPEG_TIMEOUT_S)
+        try:
+            _, err = await asyncio.wait_for(
+                proc.communicate(), timeout=FFMPEG_TIMEOUT_S
+            )
+        except asyncio.TimeoutError:
+            # wait_for 只取消等待，不杀子进程；不 kill 会留下僵尸 ffmpeg。
+            with contextlib.suppress(Exception):
+                proc.kill()
+                await proc.wait()
+            logger.warning(
+                "[QWPad] ffmpeg 转 PCM 超时（%.0fs），已终止", FFMPEG_TIMEOUT_S
+            )
+            return None
         if proc.returncode != 0 or not os.path.isfile(pcm_path):
             logger.warning("[QWPad] ffmpeg 转 PCM 失败: %s", (err or b"")[:200])
             return None
