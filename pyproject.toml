@@ -1,0 +1,8 @@
+[tool.ruff]
+target-version = "py310"
+line-length = 88
+exclude = [".git", ".pytest_cache", ".ruff_cache", "__pycache__"]
+
+[tool.ruff.lint]
+# 插件目录名带连字符是 AstrBot 规范，不是 Python 包名。
+ignore = ["N999"]

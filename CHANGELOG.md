@@ -1,5 +1,32 @@
 # Changelog
 
+## 0.3.0 — 2026-10-23
+
+对照 AstrBot 4.29.1 插件/平台适配器规范逐项校正，不修改平台名、配置字段与数据格式。
+
+### 修复
+
+- **平台状态卡在 RUNNING**：轮询中 TOKEN 失效时 `run()` 重新抛出原始异常，AstrBot
+  的 `PlatformManager` 会把实例标记为 `ERROR`，不再一直显示运行中。
+- **流式回复重复上报指标**：`send_streaming` 聚合分片后只调用一次 `send()`，
+  删除了额外的基类 `send_streaming` 调用，避免同一条回复上报两次
+  `msg_event_tick`（且生成器已被消费）。
+- **事件循环阻塞**：游标读写、临时文件创建/读/写/删除、大小查询、上传文件
+  打开与 MD5 计算全部移入 `asyncio.to_thread`，大文件上传不再卡住事件循环。
+- 语音转写的临时文件清理改为异步；关闭客户端时的宽泛异常显式标注。
+- `metadata.yaml` 移除非标准 `entry` 字段。
+
+### 新增
+
+- `requirements.txt` 声明运行依赖 `httpx>=0.28,<1`、`pilk>=0.2.4,<1`。
+- `pyproject.toml` 的 ruff 配置（插件目录名带连字符，忽略 `N999`）。
+- 回归测试：TOKEN 失效时 `run()` 抛错且状态为 `ERROR`、占用表清理；流式分片
+  聚合为一次发送且不调用基类 `send_streaming`。
+
+### 文档
+
+- README/DEPLOY 更新到 0.3.0、AstrBot 4.29.1，补充依赖安装与 0.2.x→0.3.0 升级说明。
+
 ## 0.2.1 — 2026-10-22
 
 对照 QWPad OpenAPI（`https://api.qwpad.com/openapi.json`）逐项校正。

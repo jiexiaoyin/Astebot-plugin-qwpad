@@ -1,7 +1,6 @@
 import asyncio
 
 from astrbot.api.message_components import At, AtAll, File, Plain, Video
-
 from qwpad_plugin.qwpad_client import (
     BIG_FILE_TYPE_FILE,
     BIG_FILE_TYPE_VIDEO,
@@ -78,9 +77,7 @@ def test_strip_markdown():
 
 def test_send_chain_plain():
     client = FakeClient()
-    stats = asyncio.run(
-        send_chain(client, "chat-1", [Plain("你好")], limit=2000)
-    )
+    stats = asyncio.run(send_chain(client, "chat-1", [Plain("你好")], limit=2000))
     assert stats["success"] is True
     assert client.texts[0]["content"] == "你好"
     assert client.texts[0]["reply"] is None
@@ -104,9 +101,7 @@ def test_send_chain_at_uses_hypertext():
 
 def test_send_chain_at_all():
     client = FakeClient()
-    asyncio.run(
-        send_chain(client, "room-1", [AtAll(), Plain("通知")], limit=2000)
-    )
+    asyncio.run(send_chain(client, "room-1", [AtAll(), Plain("通知")], limit=2000))
     assert {"subtype": 1, "text": "0"} in client.hyper[0]["content"]
 
 
@@ -122,7 +117,9 @@ def test_send_chain_quote_first_piece():
     }
     long_text = "a" * 2500
     asyncio.run(
-        send_chain(client, "chat-1", [Plain(long_text)], reply_anchor=anchor, limit=2000)
+        send_chain(
+            client, "chat-1", [Plain(long_text)], reply_anchor=anchor, limit=2000
+        )
     )
     # 首片走 hypertext（空串 + 正文 + 引用），第二片普通文本且不引用。
     assert client.hyper[0]["reply"]["msgUniqueIdentifier"] == "orig-1"
@@ -154,9 +151,7 @@ def test_video_at_20mib_uses_big_upload(tmp_path):
         fh.truncate(MAX_CDN_UPLOAD_BYTES)
     client = FakeClient()
 
-    stats = asyncio.run(
-        send_chain(client, "chat-1", [Video.fromFileSystem(str(path))])
-    )
+    stats = asyncio.run(send_chain(client, "chat-1", [Video.fromFileSystem(str(path))]))
 
     assert stats["success"] is True
     assert client.uploads == [("big", str(path), BIG_FILE_TYPE_VIDEO)]

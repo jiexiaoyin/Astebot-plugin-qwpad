@@ -27,8 +27,8 @@ class QWPadMessageEvent(AstrMessageEvent):
     def __init__(
         self,
         *args: Any,
-        client: "QWPadClient | None" = None,
-        adapter: "QWPadAdapter | None" = None,
+        client: QWPadClient | None = None,
+        adapter: QWPadAdapter | None = None,
         chat_id: str = "",
         reply_anchor: dict[str, Any] | None = None,
         **kwargs: Any,
@@ -81,8 +81,10 @@ class QWPadMessageEvent(AstrMessageEvent):
             else:
                 combined.chain.extend(chain.chain)
         if combined is not None:
+            # self.send() 内部已经调用 super().send() 完成 metric 上报；
+            # 这里不能再调用 super().send_streaming()，否则同一条回复会上报两次
+            # msg_event_tick（且生成器已被本方法消费完）。
             await self.send(combined)
-        await super().send_streaming(generator, use_fallback)
 
 
 __all__ = ["QWPadMessageEvent"]

@@ -18,7 +18,6 @@ QWPad 每条文本上限约 2000 字符，超长自动分片。
 from __future__ import annotations
 
 import asyncio
-import contextlib
 import math
 import os
 import re
@@ -49,6 +48,7 @@ from .qwpad_client import (
     QWPadClient,
     QWPadError,
 )
+from .qwpad_io import unlink_quietly, write_bytes
 from .qwpad_media import encode_voice_to_silk, safe_filename
 
 MAX_MESSAGE_LENGTH = 2000
@@ -212,7 +212,7 @@ async def _probe_video(path: str) -> tuple[int, int]:
             stderr=asyncio.subprocess.DEVNULL,
         )
         out, _ = await asyncio.wait_for(proc.communicate(), timeout=10.0)
-        duration = int(math.ceil(float((out or b"").strip() or 0)))
+        duration = math.ceil(float((out or b"").strip() or 0))
         return max(0, duration), 0
     except Exception:  # noqa: BLE001 - 时长只是元数据
         return 0, 0
@@ -297,15 +297,13 @@ async def _send_media_component(
             )
             return True
         silk, voice_time = encoded
-        tmp = _temp_silk_path()
+        tmp = await asyncio.to_thread(_temp_silk_path)
         try:
-            with open(tmp, "wb") as fh:
-                fh.write(silk)
+            await write_bytes(tmp, silk)
             upload = await client.upload_file(tmp, FILE_TYPE_FILE)
             await client.send_voice(chat_id, upload, voice_time, reply=reply)
         finally:
-            with contextlib.suppress(OSError):
-                os.unlink(tmp)
+            await unlink_quietly(tmp)
         return True
 
     if isinstance(component, Video):
@@ -376,7 +374,9 @@ def _at_segment(component: At) -> dict[str, Any] | None:
 
 def _fallback_text(component: Any) -> str:
     if isinstance(component, Share):
-        return "\n".join(p for p in (component.title, component.content, component.url) if p)
+        return "\n".join(
+            p for p in (component.title, component.content, component.url) if p
+        )
     if isinstance(component, Location):
         title = getattr(component, "title", "") or ""
         address = getattr(component, "address", "") or ""

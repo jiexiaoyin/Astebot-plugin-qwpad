@@ -7,7 +7,6 @@
 from __future__ import annotations
 
 import asyncio
-import contextlib
 import math
 import os
 import re
@@ -18,6 +17,7 @@ from pathlib import Path
 from astrbot import logger
 
 from .qwpad_client import QWPadClient, QWPadError
+from .qwpad_io import file_size, read_bytes, unlink_quietly, write_bytes
 from .qwpad_messages import MediaRef
 
 MAX_MEDIA_BYTES = 50 * 1024 * 1024
@@ -96,17 +96,17 @@ async def decode_silk_bytes(silk: bytes) -> str | None:
     """SILK → WAV 临时文件路径；pilk 不可用/解码失败返回 ``None``。"""
     if not silk:
         return None
-    silk_path = _new_temp_path(".silk")
+    silk_path = await asyncio.to_thread(_new_temp_path, ".silk")
     wav_path = os.path.splitext(silk_path)[0] + ".wav"
     keep_wav = False
     try:
-        Path(silk_path).write_bytes(silk)
+        await write_bytes(silk_path, silk)
         loop = asyncio.get_running_loop()
         await asyncio.wait_for(
             loop.run_in_executor(None, _silk_to_wav_sync, silk_path, wav_path),
             timeout=SILK_TIMEOUT_S,
         )
-        if os.path.isfile(wav_path) and os.path.getsize(wav_path) > 44:
+        if os.path.isfile(wav_path) and await file_size(wav_path) > 44:
             keep_wav = True
             return wav_path
         return None
@@ -114,11 +114,9 @@ async def decode_silk_bytes(silk: bytes) -> str | None:
         logger.warning("[QWPad] SILK 解码失败: %s", exc)
         return None
     finally:
-        with contextlib.suppress(OSError):
-            os.unlink(silk_path)
+        await unlink_quietly(silk_path)
         if not keep_wav:
-            with contextlib.suppress(OSError):
-                os.unlink(wav_path)
+            await unlink_quietly(wav_path)
 
 
 def _silk_to_wav_sync(silk_path: str, wav_path: str) -> None:
@@ -137,20 +135,18 @@ async def cache_media(client: QWPadClient, ref: MediaRef) -> tuple[str, str] | N
     if not raw:
         return None
     if len(raw) > MAX_MEDIA_BYTES:
-        logger.warning(
-            "[QWPad] %s 超过大小上限 %s 字节，丢弃", ref.kind, len(raw)
-        )
+        logger.warning("[QWPad] %s 超过大小上限 %s 字节，丢弃", ref.kind, len(raw))
         return None
 
     try:
         if ref.kind == "image":
-            path = _new_temp_path(sniff_image_suffix(raw))
-            Path(path).write_bytes(raw)
+            path = await asyncio.to_thread(_new_temp_path, sniff_image_suffix(raw))
+            await write_bytes(path, raw)
             return path, "image"
 
         if ref.kind == "video":
-            path = _new_temp_path(sniff_video_suffix(raw))
-            Path(path).write_bytes(raw)
+            path = await asyncio.to_thread(_new_temp_path, sniff_video_suffix(raw))
+            await write_bytes(path, raw)
             return path, "video"
 
         if ref.kind == "voice":
@@ -159,13 +155,13 @@ async def cache_media(client: QWPadClient, ref: MediaRef) -> tuple[str, str] | N
                 return wav, "voice"
             # 非 SILK（AMR/MP3/微信语音直链等）按文件交出去。
             suffix = ".amr" if raw.startswith(b"#!AMR") else ".silk"
-            path = _new_temp_path(suffix)
-            Path(path).write_bytes(raw)
+            path = await asyncio.to_thread(_new_temp_path, suffix)
+            await write_bytes(path, raw)
             return path, "file"
 
         name = safe_filename(ref.filename or "file")
-        path = _new_temp_path(Path(name).suffix or ".bin")
-        Path(path).write_bytes(raw)
+        path = await asyncio.to_thread(_new_temp_path, Path(name).suffix or ".bin")
+        await write_bytes(path, raw)
         return path, "file"
     except OSError as exc:
         logger.warning("[QWPad] 缓存%s失败: %s", ref.kind, exc)
@@ -186,8 +182,8 @@ async def encode_voice_to_silk(audio_path: str) -> tuple[bytes, int] | None:
         logger.warning("[QWPad] 未安装 ffmpeg，语音降级为文件")
         return None
 
-    pcm_path = _new_temp_path(".pcm")
-    silk_path = _new_temp_path(".silk")
+    pcm_path = await asyncio.to_thread(_new_temp_path, ".pcm")
+    silk_path = await asyncio.to_thread(_new_temp_path, ".silk")
     try:
         proc = await asyncio.create_subprocess_exec(
             ffmpeg,
@@ -206,21 +202,18 @@ async def encode_voice_to_silk(audio_path: str) -> tuple[bytes, int] | None:
             stdout=asyncio.subprocess.DEVNULL,
             stderr=asyncio.subprocess.PIPE,
         )
-        _, err = await asyncio.wait_for(
-            proc.communicate(), timeout=FFMPEG_TIMEOUT_S
-        )
+        _, err = await asyncio.wait_for(proc.communicate(), timeout=FFMPEG_TIMEOUT_S)
         if proc.returncode != 0 or not os.path.isfile(pcm_path):
             logger.warning("[QWPad] ffmpeg 转 PCM 失败: %s", (err or b"")[:200])
             return None
-        pcm_size = os.path.getsize(pcm_path)
+        pcm_size = await file_size(pcm_path)
         if pcm_size <= 0:
             return None
 
         loop = asyncio.get_running_loop()
         for max_rate in (24000, 16000, 12000, 8000):
             silk_rate = max_rate
-            with contextlib.suppress(OSError):
-                os.unlink(silk_path)
+            await unlink_quietly(silk_path)
             try:
                 await asyncio.wait_for(
                     loop.run_in_executor(
@@ -236,7 +229,7 @@ async def encode_voice_to_silk(audio_path: str) -> tuple[bytes, int] | None:
             except Exception as exc:  # noqa: BLE001
                 logger.warning("[QWPad] SILK 编码失败 (max_rate=%s): %s", max_rate, exc)
                 return None
-            silk = Path(silk_path).read_bytes()
+            silk = await read_bytes(silk_path)
             if silk.startswith(b"\x02") and len(silk) <= MAX_SILK_BYTES:
                 voice_time = max(1, math.ceil(pcm_size / 48 / 1000))
                 return silk, voice_time
@@ -248,8 +241,7 @@ async def encode_voice_to_silk(audio_path: str) -> tuple[bytes, int] | None:
         return None
     finally:
         for path in (pcm_path, silk_path):
-            with contextlib.suppress(OSError):
-                os.unlink(path)
+            await unlink_quietly(path)
 
 
 def _encode_pcm_sync(
@@ -257,7 +249,9 @@ def _encode_pcm_sync(
 ) -> None:
     from pilk import SilkEncoder
 
-    encoder = SilkEncoder(pcm_rate=VOICE_SAMPLE_RATE, silk_rate=silk_rate, max_rate=max_rate)
+    encoder = SilkEncoder(
+        pcm_rate=VOICE_SAMPLE_RATE, silk_rate=silk_rate, max_rate=max_rate
+    )
     encoder.encode(pcm_path, silk_path, tencent=True)
 
 

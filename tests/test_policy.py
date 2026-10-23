@@ -28,7 +28,9 @@ def test_allow_all_users():
 
 
 def test_block_beats_allow():
-    policy = PolicySnapshot(allow_users=frozenset({"u1"}), block_users=frozenset({"u1"}))
+    policy = PolicySnapshot(
+        allow_users=frozenset({"u1"}), block_users=frozenset({"u1"})
+    )
     decision = classify(policy, _msg())
     assert not decision
     assert decision.reason == "blocked_user"

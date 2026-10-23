@@ -6,7 +6,6 @@ import json
 
 import httpx
 import pytest
-
 from qwpad_plugin.qwpad_client import (
     BIG_FILE_TYPE_FILE,
     BIG_FILE_TYPE_VIDEO,
@@ -46,9 +45,7 @@ def test_download_url_does_not_send_authorization():
 
 def test_download_url_rejects_fs_scheme():
     async def run():
-        client = QWPadClient(
-            "wxa_test", transport=httpx.MockTransport(lambda r: None)
-        )
+        client = QWPadClient("wxa_test", transport=httpx.MockTransport(lambda r: None))
         try:
             await client._download_url("fs:///objects/abc")
         finally:
@@ -118,9 +115,7 @@ def test_send_video_prefers_upload_duration_and_thumb():
     async def run():
         client = QWPadClient("wxa_test", transport=httpx.MockTransport(handler))
         try:
-            await client.send_video(
-                "1001", upload, "v.mp4", duration=99, cover_size=1
-            )
+            await client.send_video("1001", upload, "v.mp4", duration=99, cover_size=1)
         finally:
             await client.close()
 

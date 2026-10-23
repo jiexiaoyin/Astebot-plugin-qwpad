@@ -37,10 +37,10 @@ from .qwpad_client import (
     MSG_CONTENT_IMAGE_P2P,
     MSG_CONTENT_IMAGE_WWFTN,
     MSG_CONTENT_IMAGE_WWFTN_ENCRYPT,
-    MSG_CONTENT_VOICE_WWFTN,
-    MSG_CONTENT_VOICE_WWFTN_ENCRYPT,
     MSG_CONTENT_VIDEO_WWFTN,
     MSG_CONTENT_VIDEO_WWFTN_ENCRYPT,
+    MSG_CONTENT_VOICE_WWFTN,
+    MSG_CONTENT_VOICE_WWFTN_ENCRYPT,
     MSG_EMOTION,
     MSG_FILE,
     MSG_FORWARD,
@@ -55,8 +55,8 @@ from .qwpad_client import (
     MSG_NOTIFICATION_CARD,
     MSG_PERSONAL_CARD,
     MSG_RED_ENVELOPE,
-    MSG_RICH_TEXT,
     MSG_REVOKE_NOTICE,
+    MSG_RICH_TEXT,
     MSG_ROOM_INVITE,
     MSG_SECURITY_CENTER,
     MSG_SNS_TASK,
@@ -118,7 +118,12 @@ EXTERNAL_MEDIA_MSG_TYPES = {MSG_WECHAT_IMAGE, MSG_WECHAT_FILE, MSG_WECHAT_VIDEO}
 # 这些类型是纯噪音：已读回执、撤回提示等，不进上下文、不回复。
 IGNORED_MSG_TYPES = {2001, 2005, MSG_REVOKE_NOTICE, 2180}
 
-PLACEHOLDERS = {"image": "[图片]", "voice": "[语音]", "video": "[视频]", "file": "[文件]"}
+PLACEHOLDERS = {
+    "image": "[图片]",
+    "voice": "[语音]",
+    "video": "[视频]",
+    "file": "[文件]",
+}
 
 
 @dataclass
@@ -324,16 +329,12 @@ def _clean_text(text: str, self_nick: str) -> str:
     """去掉 @自己 的前缀/行内标记。"""
     if not text:
         return ""
-    cleaned = text.replace(" ", " ").replace("​", "")
+    cleaned = text.replace("\u2005", " ").replace("\u200b", "")
     for nick in {n for n in (self_nick, "@" + self_nick) if n}:
-        if cleaned.startswith(nick + " "):
-            cleaned = cleaned[len(nick) + 1 :]
-        elif cleaned.startswith(nick + " "):
+        if cleaned.startswith((nick + " ", nick + "\u2005")):
             cleaned = cleaned[len(nick) + 1 :]
         cleaned = (
-            cleaned.replace(nick + " ", "", 1)
-            if cleaned.startswith(nick)
-            else cleaned
+            cleaned.replace(nick + " ", "", 1) if cleaned.startswith(nick) else cleaned
         )
     return cleaned.strip()
 
@@ -349,9 +350,7 @@ def _is_mentioned(
                 return True
             if self_nick and _s(entry.get("nickname")) == self_nick:
                 return True
-    if self_nick and (f"@{self_nick}" in (text or "")):
-        return True
-    return False
+    return bool(self_nick and f"@{self_nick}" in (text or ""))
 
 
 # 人工在企微客户端「引用」一条消息时，pad 服务端会把引用压平成纯文本（实测 2026-10-22）：
@@ -506,9 +505,7 @@ def _extract_text(data: dict[str, Any], display: dict[str, Any], msg_type: int) 
         lat, lon = data.get("latitude"), data.get("longitude")
         where = " ".join(p for p in (title, address) if p)
         coords = (
-            f"({lat},{lon})"
-            if lat not in (None, "") and lon not in (None, "")
-            else ""
+            f"({lat},{lon})" if lat not in (None, "") and lon not in (None, "") else ""
         )
         return f"[位置] {where} {coords}".strip()
 
@@ -537,9 +534,7 @@ def _extract_text(data: dict[str, Any], display: dict[str, Any], msg_type: int) 
 
     if msg_type == MSG_MINI_PROGRAM:
         title = _first_str(data, "title") or _first_str(content_block, "title")
-        desc = _first_str(data, "desc") or _first_str(
-            content_block, "description"
-        )
+        desc = _first_str(data, "desc") or _first_str(content_block, "description")
         app = _first_str(data, "appName")
         parts = [p for p in (title, desc, app) if p]
         return f"[小程序] {' — '.join(parts)}".strip()
@@ -731,7 +726,12 @@ def parse_event(
         # 有正文的类型，用 nativeName 占位进对话（模型至少能告知「收到一条 X」）；
         # no_body / empty_body 才是纯噪音。
         label = native_name or MSG_TYPE_NAMES.get(msg_type, "")
-        if label and parse_status in ("parsed", "parsed_media", "partial", "unsupported"):
+        if label and parse_status in (
+            "parsed",
+            "parsed_media",
+            "partial",
+            "unsupported",
+        ):
             inbox.text = f"[{label}]"
         else:
             logger.debug(
@@ -758,9 +758,9 @@ __all__ = [
     "EVENT_TYPE_CHAT",
     "IGNORED_MSG_TYPES",
     "MEDIA_MSG_TYPES",
+    "PLACEHOLDERS",
     "InboundMessage",
     "MediaRef",
-    "PLACEHOLDERS",
     "parse_event",
     "reply_context",
     "split_flattened_quote",

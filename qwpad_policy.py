@@ -49,7 +49,7 @@ class PolicySnapshot:
     group_reply: str = "atbot"
 
     @classmethod
-    def from_config(cls, config: dict[str, Any]) -> "PolicySnapshot":
+    def from_config(cls, config: dict[str, Any]) -> PolicySnapshot:
         mode = str(config.get("group_reply", "atbot") or "atbot").strip().lower()
         if mode not in GROUP_REPLY_MODES:
             mode = "atbot"
@@ -64,11 +64,7 @@ class PolicySnapshot:
 
     @property
     def permits_anyone(self) -> bool:
-        return bool(
-            self.allow_all_users
-            or self.allow_users
-            or self.allow_groups
-        )
+        return bool(self.allow_all_users or self.allow_users or self.allow_groups)
 
 
 @dataclass(frozen=True)
@@ -94,9 +90,12 @@ def classify(policy: PolicySnapshot, inbox: Any) -> Admission:
     if is_group:
         if policy.group_reply == "none":
             return Admission(False, "group_ignored")
-        if not policy.allow_all_users:
-            if chat_id not in policy.allow_groups and user_id not in policy.allow_users:
-                return Admission(False, "group_not_allowed")
+        if (
+            not policy.allow_all_users
+            and chat_id not in policy.allow_groups
+            and user_id not in policy.allow_users
+        ):
+            return Admission(False, "group_not_allowed")
         if policy.group_reply == "atbot" and not getattr(inbox, "mentions_me", False):
             return Admission(False, "group_not_mentioned")
         return Admission(True, "group")

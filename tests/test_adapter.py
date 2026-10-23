@@ -1,14 +1,15 @@
 import asyncio
 
 import pytest
-from astrbot.api.event import MessageChain
+from astrbot.api.event import AstrMessageEvent, MessageChain
 from astrbot.api.message_components import At, Plain, Record, Reply
-
+from astrbot.core.platform.platform import PlatformStatus
 from qwpad_plugin.qwpad_adapter import (
     QUOTE_WINDOW_S,
     QWPadAdapter,
     account_online_state,
 )
+from qwpad_plugin.qwpad_client import QWPadAuthError
 from qwpad_plugin.qwpad_messages import parse_event
 from qwpad_plugin.qwpad_policy import PolicySnapshot
 
@@ -385,6 +386,7 @@ def test_run_rejects_offline_account(monkeypatch):
     adapter = QWPadAdapter(
         {"id": "qwpad-offline", "token": "wxa_offline"}, {}, asyncio.Queue()
     )
+
     async def run():
         with pytest.raises(RuntimeError, match="userOnlineStatus=0"):
             await adapter.run()
@@ -435,3 +437,85 @@ def test_non_text_anchor_not_quoted():
     adapter._remember_reply_anchor(inbox)
     event = adapter.create_event(adapter._build_message(inbox, "测试群", []))
     assert event._reply_anchor is None
+
+
+def test_fatal_auth_error_propagates_and_marks_error(monkeypatch):
+    """轮询里 TOKEN 失效时 run() 必须抛错，平台状态不能停在 RUNNING。"""
+    from qwpad_plugin import qwpad_adapter
+
+    class ExpiredClient:
+        def __init__(self, *args, **kwargs):
+            pass
+
+        async def get_login_status(self):
+            return {
+                "errorCode": 0,
+                "errorMsg": "",
+                "userId": "1001",
+                "userOnlineStatus": 2,
+            }
+
+        async def fetch_events(self, *args, **kwargs):
+            raise QWPadAuthError("TOKEN 已失效")
+
+        async def close(self):
+            return None
+
+    class Cursor:
+        def __init__(self, directory):
+            pass
+
+        def load(self):
+            return 1
+
+        def save(self, event_id):
+            pass
+
+    monkeypatch.setattr(qwpad_adapter, "QWPadClient", ExpiredClient)
+    monkeypatch.setattr(qwpad_adapter, "CursorStore", Cursor)
+    adapter = QWPadAdapter(
+        {"id": "qwpad-expired", "token": "wxa_expired"}, {}, asyncio.Queue()
+    )
+
+    async def run():
+        with pytest.raises(QWPadAuthError, match="TOKEN 已失效"):
+            await asyncio.wait_for(adapter.run(), timeout=2)
+
+    asyncio.run(run())
+    assert adapter.status == PlatformStatus.ERROR
+    assert adapter._fatal_error is not None
+    # 占用表/实例表必须清理，便于修复 TOKEN 后重新启用。
+    from qwpad_plugin.qwpad_storage import token_fingerprint
+
+    assert token_fingerprint(adapter.token) not in QWPadAdapter._ACTIVE_TOKENS
+    assert adapter.instance_id not in QWPadAdapter.instances
+
+
+def test_send_streaming_aggregates_without_double_metric(monkeypatch):
+    """流式输出只调用一次 send()，不能再走基类 send_streaming 重复上报 metric。"""
+    adapter = _adapter()
+    inbox = parse_event(_dm_item(), self_id="999", self_nick="小助理")
+    event = adapter.create_event(adapter._build_message(inbox, "张三", []))
+    sent = []
+
+    async def fake_send(chain):
+        sent.append(chain)
+
+    async def base_streaming_should_not_run(*args, **kwargs):
+        raise AssertionError("不应调用基类 send_streaming（会重复上报 metric）")
+
+    monkeypatch.setattr(event, "send", fake_send)
+    monkeypatch.setattr(
+        AstrMessageEvent, "send_streaming", base_streaming_should_not_run
+    )
+
+    async def chunks():
+        yield MessageChain([Plain("第一段")])
+        yield MessageChain([Plain("第二段")])
+
+    asyncio.run(event.send_streaming(chunks()))
+    assert len(sent) == 1
+    assert [c.text for c in sent[0].chain if isinstance(c, Plain)] == [
+        "第一段",
+        "第二段",
+    ]

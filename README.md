@@ -4,7 +4,7 @@
 它通过 [QWPad](https://api.qwpad.com) 的 OpenAPI 长轮询收发消息，让 AstrBot 直接以
 企业微信账号身份与同事、客户对话，**不需要公网 IP、不需要配置回调地址**。
 
-当前版本：`0.2.1` · 适用 AstrBot `>= 4.16.0, < 5`（已在 4.29.0 验证）
+当前版本：`0.3.0` · 适用 AstrBot `>= 4.16.0, < 5`（已在 4.29.1 验证）
 
 - 仓库：<https://github.com/jiexiaoyin/Astebot-plugin-qwpad>
 - 许可证：MIT
@@ -146,14 +146,14 @@ QWPad 的 `wxa_` TOKEN 与企业微信账号一一对应。插件按平台实例
 
 | 组件 | 要求 |
 | --- | --- |
-| AstrBot | `>= 4.16.0, < 5`，已在 `4.29.0` 验证 |
+| AstrBot | `>= 4.16.0, < 5`，已在 `4.29.1` 验证 |
 | Python | 3.10+（跟随 AstrBot 运行环境） |
-| Python 包 | `httpx`（AstrBot 已自带）、`pilk`（SILK 编解码，AstrBot 镜像已自带） |
+| Python 包 | `httpx>=0.28,<1`、`pilk>=0.2.4,<1`（见 `requirements.txt`；AstrBot 镜像已自带） |
 | 系统命令 | `ffmpeg` / `ffprobe`（出站语音、视频时长；缺失时语音降级为文件） |
 | QWPad | 已开通业务 TOKEN（`wxa_` 前缀），对应企业微信账号已完成扫码登录并在线 |
 | 网络 | AstrBot 能访问 `api_base`（默认 `https://api.qwpad.com`）；无需公网入站 |
 
-检查依赖：
+检查依赖（也可 `pip install -r requirements.txt`）：
 
 ```bash
 # 容器名按实际替换
@@ -174,7 +174,7 @@ AstrBot Dashboard → 插件管理 → 安装插件 → 填入仓库地址：
 https://github.com/jiexiaoyin/Astebot-plugin-qwpad
 ```
 
-安装后在插件列表确认版本为 `0.2.1`，并重启 AstrBot 或重载插件。
+安装后在插件列表确认版本为 `0.3.0`，并重启 AstrBot 或重载插件。
 
 ### 5.2 手动部署
 
@@ -197,7 +197,7 @@ docker restart astrbot   # 或重启你的 AstrBot 进程
 
 ```text
 Loading plugin astrbot-plugin-qwpad ...
-Plugin astrbot-plugin-qwpad (0.2.1) ...
+Plugin astrbot-plugin-qwpad (0.3.0) ...
 Loading IM platform adapter wecom(Pad)(wecom(Pad)) ...
 ```
 
@@ -656,7 +656,17 @@ qwpad_client ──► qwpad_messages（解析/过滤）
 
 生产迁移前请先停 AstrBot，备份 `cmd_config.json`、数据库和插件数据目录。
 
-### 15.3 回滚
+### 15.3 从 0.2.x 升级到 0.3.0
+
+0.3.0 不修改平台注册名、配置字段或数据格式，可直接覆盖插件目录后重启。该版本
+主要做健壮性加固：
+
+- 游标读写、临时文件、语音/媒体落盘等阻塞 I/O 全部移入线程池，避免卡住事件循环；
+- TOKEN 失效时 `run()` 重新抛出错误，平台状态正确变为 `ERROR`（不再停在 `RUNNING`）；
+- 流式输出只发送一次、只上报一次 `msg_event_tick`，修复重复指标；
+- 补齐 `requirements.txt`，移除 `metadata.yaml` 中非标准字段。
+
+### 15.4 回滚
 
 1. 停 AstrBot；
 2. 恢复旧插件目录、`cmd_config.json`、数据库备份和插件数据目录；
@@ -713,6 +723,8 @@ python -m pytest -q
 - 策略：白/黑名单、群模式、默认拒绝；
 - 发送：分片、Markdown 清洗、@、引用、媒体降级；
 - 适配器契约：元数据、消息构建、统计、重复 TOKEN 锁；
+- 生命周期：TOKEN 失效时 `run()` 抛错并置 `ERROR`；
+- 流式输出：多个分片聚合为一次发送，不重复调用基类 `send_streaming`；
 - 状态接口字段。
 
 > 单元测试全绿不代表主路径能跑。改完适配器后至少做一次真实主路径验证：

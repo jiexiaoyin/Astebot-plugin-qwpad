@@ -14,12 +14,13 @@ import asyncio
 import hashlib
 import mimetypes
 import os
+from collections.abc import AsyncIterator
+from contextlib import asynccontextmanager
 from dataclasses import dataclass, field
-from typing import Any
+from typing import Any, BinaryIO
 from urllib.parse import urlsplit
 
 import httpx
-
 from astrbot import logger
 
 DEFAULT_BASE_URL = "https://api.qwpad.com"
@@ -217,6 +218,20 @@ def _md5_file(path: str) -> str:
     return digest.hexdigest()
 
 
+@asynccontextmanager
+async def _open_binary(path: str) -> AsyncIterator[BinaryIO]:
+    """在工作线程打开文件，避免上传前阻塞事件循环。
+
+    httpx 的 multipart 仍会同步读取文件句柄，但打开/关闭以及 MD5 兜底计算
+    已经移出事件循环；大文件上传本身是网络 I/O，句柄读取占比很小。
+    """
+    fh = await asyncio.to_thread(open, path, "rb")
+    try:
+        yield fh
+    finally:
+        await asyncio.to_thread(fh.close)
+
+
 def _unwrap(payload: Any, path: str) -> Any:
     """解包 ``{code,msg,data}``；成功返回 ``data``。"""
     if not isinstance(payload, dict):
@@ -259,11 +274,11 @@ class QWPadClient:
         self._download_lock = asyncio.Lock()
 
     # ── 生命周期 ────────────────────────────────────────────────────────────
-    async def __aenter__(self) -> "QWPadClient":
+    async def __aenter__(self) -> QWPadClient:  # noqa: PYI034 - py3.10 无 typing.Self
         await self._ensure_http()
         return self
 
-    async def __aexit__(self, *exc: Any) -> None:
+    async def __aexit__(self, *exc: object) -> None:
         await self.close()
 
     async def _ensure_http(self) -> httpx.AsyncClient:
@@ -306,7 +321,7 @@ class QWPadClient:
                 continue
             try:
                 await client.aclose()
-            except Exception:  # pragma: no cover - 关闭失败不影响退出
+            except Exception:  # noqa: BLE001 - 关闭失败不影响退出
                 logger.debug("[QWPad] 关闭 HTTP 客户端失败", exc_info=True)
 
     # ── 底层请求 ────────────────────────────────────────────────────────────
@@ -597,7 +612,10 @@ class QWPadClient:
                 f"{MAX_CDN_UPLOAD_BYTES} 字节；QWPad 无大图片接口，请先压缩图片",
                 retryable=False,
             )
-        if file_type in (FILE_TYPE_VIDEO, FILE_TYPE_FILE) and size >= MAX_CDN_UPLOAD_BYTES:
+        if (
+            file_type in (FILE_TYPE_VIDEO, FILE_TYPE_FILE)
+            and size >= MAX_CDN_UPLOAD_BYTES
+        ):
             raise QWPadApiError(
                 f"文件 {os.path.basename(path)} 为 {size} 字节，超过普通 CDN 上传上限 "
                 f"{MAX_CDN_UPLOAD_BYTES} 字节，请改用 upload_big_file",
@@ -606,13 +624,14 @@ class QWPadClient:
         return size
 
     @staticmethod
-    def _fill_upload_metadata(
+    async def _fill_upload_metadata(
         data: dict[str, Any], path: str, size: int
     ) -> dict[str, Any]:
         if not data.get("fileSize"):
             data["fileSize"] = size
         if not data.get("fileMd5"):
-            data["fileMd5"] = _md5_file(path)
+            # 大文件 MD5 可能是数百 MiB 的同步读，必须离开事件循环。
+            data["fileMd5"] = await asyncio.to_thread(_md5_file, path)
         return data
 
     async def voice_to_text(
@@ -634,9 +653,7 @@ class QWPadClient:
         applied = await self.post("/msg/voiceToTextApply", {"msgServerId": msg_id})
         voice_id = str((applied or {}).get("voiceId") or "").strip()
         if not voice_id:
-            raise QWPadApiError(
-                "语音转文字申请未返回 voiceId", retryable=False
-            )
+            raise QWPadApiError("语音转文字申请未返回 voiceId", retryable=False)
         payload: dict[str, Any] = {"msgServerId": msg_id, "voiceId": voice_id}
         if seq:
             payload["seq"] = int(seq)
@@ -647,9 +664,7 @@ class QWPadClient:
             if data.get("isEnd"):
                 return text
             if asyncio.get_running_loop().time() >= deadline:
-                raise QWPadApiError(
-                    "语音转文字超时（任务未完成）", retryable=True
-                )
+                raise QWPadApiError("语音转文字超时（任务未完成）", retryable=True)
             await asyncio.sleep(max(0.2, interval))
 
     async def upload_file(
@@ -664,7 +679,7 @@ class QWPadClient:
         size = self._check_upload_size(path, file_type)
         name = os.path.basename(path) or "file"
         mime = mimetypes.guess_type(name)[0] or "application/octet-stream"
-        with open(path, "rb") as fh:
+        async with _open_binary(path) as fh:
             data = await self._request(
                 "POST",
                 "/cloud/cdnBigUpload",
@@ -672,7 +687,7 @@ class QWPadClient:
                 data={"fileType": str(int(file_type))},
                 timeout=UPLOAD_TIMEOUT,
             )
-        return self._fill_upload_metadata(dict(data or {}), path, size)
+        return await self._fill_upload_metadata(dict(data or {}), path, size)
 
     async def upload_big_file(
         self, path: str, file_type: int = BIG_FILE_TYPE_FILE
@@ -696,7 +711,7 @@ class QWPadClient:
             )
         name = os.path.basename(path) or "file"
         mime = mimetypes.guess_type(name)[0] or "application/octet-stream"
-        with open(path, "rb") as fh:
+        async with _open_binary(path) as fh:
             data = await self._request(
                 "POST",
                 "/cloud/cdnBigFileUpload",
@@ -709,7 +724,7 @@ class QWPadClient:
             raise QWPadApiError(
                 "大文件上传成功但未返回 fileConvertId，无法发送", retryable=False
             )
-        return self._fill_upload_metadata(data, path, size)
+        return await self._fill_upload_metadata(data, path, size)
 
     async def download_wxwork_file(self, ref: dict[str, Any]) -> bytes | None:
         """``/cloud/wxWorkDownload`` 拿 cloudUrl，再把字节取回。"""
@@ -779,7 +794,9 @@ class QWPadClient:
                         len(raw),
                     )
                 return raw
-        logger.warning("[QWPad] /cloud/wxDownload 全部尺寸失败: %s", "; ".join(failures))
+        logger.warning(
+            "[QWPad] /cloud/wxDownload 全部尺寸失败: %s", "; ".join(failures)
+        )
         return None
 
     async def _download_url(
@@ -847,12 +864,12 @@ __all__ = [
     "BROWSER_UA",
     "DEFAULT_BASE_URL",
     "DEFAULT_TIMEOUT",
-    "EventsPage",
     "FILE_TYPE_FILE",
     "FILE_TYPE_IMAGE",
     "FILE_TYPE_VIDEO",
     "MAX_CDN_UPLOAD_BYTES",
     "MSG_TYPE_NAMES",
+    "EventsPage",
     "QWPadApiError",
     "QWPadAuthError",
     "QWPadClient",

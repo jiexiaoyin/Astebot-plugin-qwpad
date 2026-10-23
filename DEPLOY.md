@@ -1,10 +1,10 @@
 # 部署与验证
 
 本文面向运维/部署人员，说明如何把 `astrbot-plugin-qwpad` 装进 AstrBot、配置平台
-实例、验证收发，以及从 0.1.x 迁移到 0.2.x。
+实例、验证收发，以及从 0.1.x 迁移到 0.2.x、0.2.x 升级到 0.3.0。
 
-- 插件版本：`0.2.1`
-- 验证环境：AstrBot `4.29.0`（Docker，`soulter/astrbot:v4.29.0`）
+- 插件版本：`0.3.0`
+- 验证环境：AstrBot `4.29.1`（Docker，`soulter/astrbot:v4.29.1`）
 - 仓库：<https://github.com/jiexiaoyin/Astebot-plugin-qwpad>
 
 > 文中 `ASTRBOT_DATA` 指 AstrBot 的 data 目录。Docker 部署通常是宿主机挂载目录，
@@ -61,7 +61,7 @@ AstrBot Dashboard → 插件管理 → 安装插件 → 填入仓库地址：
 https://github.com/jiexiaoyin/Astebot-plugin-qwpad
 ```
 
-安装后确认插件版本为 `0.2.1`。
+安装后确认插件版本为 `0.3.0`。
 
 ### 方式 B：手动部署
 
@@ -181,7 +181,7 @@ docker logs --since 3m astrbot 2>&1 | grep -iE 'qwpad|wecom\(Pad\)|platform'
 
 ```text
 Loading plugin astrbot-plugin-qwpad ...
-Plugin astrbot-plugin-qwpad (0.2.1) ...
+Plugin astrbot-plugin-qwpad (0.3.0) ...
 Loading IM platform adapter wecom(Pad)(wecom(Pad)) ...
 [QWPad:wecom(Pad)] 已连接 <昵称>（<企业> / <userId>），游标 <n>，策略 ...
 ```
@@ -376,10 +376,27 @@ docker logs --since 3m astrbot 2>&1 | grep -iE 'qwpad|wecom\(Pad\)'
 确认：
 
 ```text
-Plugin astrbot-plugin-qwpad (0.2.1) ...
+Plugin astrbot-plugin-qwpad (0.3.0) ...
 Loading IM platform adapter wecom(Pad)(wecom(Pad)) ...
 [QWPad:wecom(Pad)] 已连接 ...
 ```
+
+### 7.1 从 0.2.x 升级到 0.3.0
+
+0.3.0 不改平台名、配置字段、UMO 或数据格式，直接覆盖插件目录并重启即可：
+
+```bash
+rsync -a --delete \
+  --exclude='.git' --exclude='tests' --exclude='__pycache__' \
+  --exclude='.pytest_cache' \
+  ./ "$ASTRBOT_DATA/plugins/astrbot-plugin-qwpad/"
+docker restart astrbot
+docker logs --since 3m astrbot 2>&1 | grep -iE 'qwpad|wecom\(Pad\)'
+```
+
+升级后确认日志版本为 `0.3.0`、平台状态为运行中、账号在线；不需要迁移数据库或
+`plugin_data`。该版本把阻塞文件 I/O 移入线程池，TOKEN 失效时平台状态会正确变为
+`ERROR`，并修复流式回复重复上报 `msg_event_tick`。
 
 ---
 

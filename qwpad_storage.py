@@ -13,8 +13,9 @@ import re
 import tempfile
 import time
 from collections import OrderedDict
+from collections.abc import Iterable
 from pathlib import Path
-from typing import Any, Iterable
+from typing import Any
 
 from astrbot import logger
 

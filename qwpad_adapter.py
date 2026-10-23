@@ -14,9 +14,8 @@ from __future__ import annotations
 
 import asyncio
 import contextlib
-import os
 import time
-from typing import Any
+from typing import Any, ClassVar
 
 from astrbot import logger
 from astrbot.api.event import MessageChain
@@ -26,7 +25,6 @@ from astrbot.api.platform import (
     PlatformMetadata,
     register_platform_adapter,
 )
-
 from astrbot.core.platform.astrbot_message import AstrBotMessage, Group, MessageMember
 from astrbot.core.platform.message_session import MessageSession
 from astrbot.core.platform.message_type import MessageType
@@ -38,6 +36,7 @@ from .qwpad_client import (
     QWPadError,
 )
 from .qwpad_event import QWPadMessageEvent
+from .qwpad_io import unlink_quietly as _unlink_quietly
 from .qwpad_media import cache_media
 from .qwpad_messages import InboundMessage, parse_event, reply_context, strip_html
 from .qwpad_policy import PolicySnapshot, as_bool, as_int, classify
@@ -179,9 +178,9 @@ class QWPadAdapter(Platform):
     """QWPad 适配器：一个平台实例对应一个 TOKEN / 一个企业微信账号。"""
 
     # 进程内 token 占用表：同一 TOKEN 只能有一个实例轮询（否则游标/消息会重复）。
-    _ACTIVE_TOKENS: dict[str, str] = {}
+    _ACTIVE_TOKENS: ClassVar[dict[str, str]] = {}
     # 供插件 Web API 查询的实例表（按平台实例 id）。
-    instances: dict[str, "QWPadAdapter"] = {}
+    instances: ClassVar[dict[str, QWPadAdapter]] = {}
 
     def __init__(
         self,
@@ -195,9 +194,9 @@ class QWPadAdapter(Platform):
         self.instance_id = str(platform_config.get("id") or PLATFORM_NAME)
 
         self.token = str(platform_config.get("token") or "").strip()
-        self.api_base = str(
-            platform_config.get("api_base") or DEFAULT_BASE_URL
-        ).strip().rstrip("/")
+        self.api_base = (
+            str(platform_config.get("api_base") or DEFAULT_BASE_URL).strip().rstrip("/")
+        )
         self.policy = PolicySnapshot.from_config(platform_config)
         self.quote_replies = as_bool(platform_config.get("quote_replies"), True)
         self.voice_to_text = as_bool(platform_config.get("voice_to_text"), True)
@@ -205,7 +204,9 @@ class QWPadAdapter(Platform):
         self.poll_wait_seconds = max(
             1, min(as_int(platform_config.get("poll_wait_seconds"), 25), 30)
         )
-        self.poll_limit = max(1, min(as_int(platform_config.get("poll_limit"), 50), 500))
+        self.poll_limit = max(
+            1, min(as_int(platform_config.get("poll_limit"), 50), 500)
+        )
         self.max_message_length = max(
             200, as_int(platform_config.get("max_message_length"), MAX_MESSAGE_LENGTH)
         )
@@ -228,6 +229,9 @@ class QWPadAdapter(Platform):
         self._poll_task: asyncio.Task | None = None
         self._stop_event = asyncio.Event()
         self._running = False
+        # 轮询循环里的致命错误（如 TOKEN 失效）。run() 在收到停止信号后
+        # 重新抛出它，让 AstrBot 的平台管理器把状态标成 ERROR，而不是一直 RUNNING。
+        self._fatal_error: Exception | None = None
         self._cursor_store: CursorStore | None = None
         self._cursor = 0
         self._dedupe = DedupeSet()
@@ -323,6 +327,7 @@ class QWPadAdapter(Platform):
 
         self._client = QWPadClient(self.token, self.api_base)
         self._stop_event.clear()
+        self._fatal_error = None
         try:
             status = await self._client.get_login_status()
             self._self_id = str(status.get("userId") or "").strip()
@@ -331,16 +336,16 @@ class QWPadAdapter(Platform):
             error_code = as_int(status.get("errorCode"), 0)
             if error_code != 0:
                 raise RuntimeError(
-                    "QWPad 登录状态查询失败（errorCode=%s %s），"
+                    f"QWPad 登录状态查询失败（errorCode={error_code} "
+                    f"{status.get('errorMsg') or ''}），"
                     "请先在 QWPad 控制台检查账号与 TOKEN"
-                    % (error_code, status.get("errorMsg") or "")
                 )
             self._account_online = account_online_state(status)
             if self._account_online is False:
                 raise RuntimeError(
-                    "QWPad 账号未在线（userOnlineStatus=%s，errorCode=0 仅表示查询成功），"
-                    "请先在 QWPad 控制台完成扫码登录"
-                    % status.get("userOnlineStatus")
+                    "QWPad 账号未在线"
+                    f"（userOnlineStatus={status.get('userOnlineStatus')}，"
+                    "errorCode=0 仅表示查询成功），请先在 QWPad 控制台完成扫码登录"
                 )
             if self._account_online is None:
                 logger.warning(
@@ -349,7 +354,8 @@ class QWPadAdapter(Platform):
                 )
 
             self._cursor_store = CursorStore(instance_dir(self.instance_id))
-            self._cursor = self._cursor_store.load()
+            # 游标文件很小，但仍在工作线程读取，避免启动时阻塞事件循环。
+            self._cursor = await asyncio.to_thread(self._cursor_store.load)
             if self._cursor == 0 and self.startup_backlog_minutes > 0:
                 self._skip_before = time.time() - self.startup_backlog_minutes * 60
             if not self.policy.permits_anyone:
@@ -374,6 +380,10 @@ class QWPadAdapter(Platform):
                 self.policy,
             )
             await self._stop_event.wait()
+            if self._fatal_error is not None:
+                # 不在这里 record_error：下方统一的异常分支会记录并重新抛出，
+                # 由平台管理器把状态置为 ERROR。
+                raise self._fatal_error
         except asyncio.CancelledError:
             raise
         except QWPadAuthError as exc:
@@ -430,11 +440,13 @@ class QWPadAdapter(Platform):
                     if event_id > self._cursor:
                         self._cursor = event_id
                         if self._cursor_store is not None:
-                            self._cursor_store.save(self._cursor)
+                            await asyncio.to_thread(
+                                self._cursor_store.save, self._cursor
+                            )
                 if page.next_id > self._cursor:
                     self._cursor = page.next_id
                     if self._cursor_store is not None:
-                        self._cursor_store.save(self._cursor)
+                        await asyncio.to_thread(self._cursor_store.save, self._cursor)
                 backoff = 1.0
                 if (
                     time.monotonic() - self._last_status_check
@@ -445,8 +457,10 @@ class QWPadAdapter(Platform):
                 raise
             except QWPadAuthError as exc:
                 self._running = False
-                self.record_error(f"TOKEN 失效：{exc}")
-                logger.error("[QWPad:%s] TOKEN 失效，停止轮询: %s", self.instance_id, exc)
+                self._fatal_error = exc
+                logger.error(
+                    "[QWPad:%s] TOKEN 失效，停止轮询: %s", self.instance_id, exc
+                )
                 self._stop_event.set()
                 return
             except QWPadError as exc:
@@ -497,7 +511,11 @@ class QWPadAdapter(Platform):
             return
         if inbox.message_id in self._dedupe:
             return
-        if self._skip_before and inbox.timestamp and inbox.timestamp < self._skip_before:
+        if (
+            self._skip_before
+            and inbox.timestamp
+            and inbox.timestamp < self._skip_before
+        ):
             self._dedupe.add(inbox.message_id)
             logger.debug(
                 "[QWPad:%s] 首次启动跳过旧消息 id=%s ts=%s",
@@ -566,8 +584,7 @@ class QWPadAdapter(Platform):
                 kept = []
                 for entry in downloaded:
                     if entry[2] == "voice":
-                        with contextlib.suppress(OSError):
-                            os.unlink(entry[1])
+                        await _unlink_quietly(entry[1])
                     else:
                         kept.append(entry)
                 downloaded = kept
@@ -675,10 +692,7 @@ class QWPadAdapter(Platform):
             elif kind == "video":
                 chain.append(Video.fromFileSystem(path))
             else:
-                name = (
-                    ref.filename
-                    or ("voice.amr" if ref.kind == "voice" else "file")
-                )
+                name = ref.filename or ("voice.amr" if ref.kind == "voice" else "file")
                 chain.append(File(name=name, file=path))
 
         if not chain:
@@ -702,7 +716,9 @@ class QWPadAdapter(Platform):
             "timeStamp": inbox.timestamp,
             "type": inbox.msg_type,
             "userId": inbox.user_id,
-            "msgData": data if isinstance(data, dict) else {"content": inbox.text or ""},
+            "msgData": data
+            if isinstance(data, dict)
+            else {"content": inbox.text or ""},
             "text": original_text,
         }
         while len(self._replies) > 500:
